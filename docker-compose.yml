@@ -1,0 +1,9 @@
+services:
+  face-enhance:
+    image: ghcr.io/poshy163/unifi-protect-face-enhance:latest
+    # To build locally instead of pulling, comment the image line above and uncomment:
+    # build: .
+    container_name: unifi-protect-face-enhance
+    restart: unless-stopped
+    env_file:
+      - .env
