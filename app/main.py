@@ -101,14 +101,44 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
 
 
 def get_face_groups(session: requests.Session, host: str) -> list:
-    """Fetch all face groups (people)."""
-    url = f"https://{host}{BASE_PROTECT}/recognition/face/groups"
-    resp = session.get(url, verify=False)
-    resp.raise_for_status()
-    data = resp.json()
-    if isinstance(data, dict) and "groups" in data:
-        return data["groups"]
-    return data
+    """Fetch all face groups (people), paginating through every page.
+
+    The default page size is 50 and the API silently caps responses. Identity
+    groups (Face Identities in Protect 7.1+) and degraded auto-clusters often
+    fall outside the first page, so we paginate explicitly.
+    """
+    all_groups = []
+    page = 1
+    page_size = 200
+
+    while True:
+        url = f"https://{host}{BASE_PROTECT}/recognition/face/groups"
+        params = {"page": page, "pageSize": page_size}
+        resp = session.get(url, params=params, verify=False)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if isinstance(data, dict) and "groups" in data:
+            batch = data["groups"]
+            has_next = data.get("links", {}).get("next") is not None
+        elif isinstance(data, list):
+            batch = data
+            has_next = len(batch) == page_size
+        else:
+            break
+
+        if not batch:
+            break
+
+        all_groups.extend(batch)
+
+        if not has_next:
+            break
+
+        page += 1
+        time.sleep(0.2)
+
+    return all_groups
 
 
 def get_group_detections(session: requests.Session, host: str, group_id: str) -> list:
