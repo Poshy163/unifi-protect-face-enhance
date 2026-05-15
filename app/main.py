@@ -25,6 +25,7 @@ import os
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import requests
@@ -235,7 +236,7 @@ def format_timestamp(ts) -> str:
     return str(ts) if ts else ""
 
 
-def run_cycle(host, username, password, base_delay, only_unenhanced, group_filter, limit, dry_run):
+def run_cycle(host, username, password, base_delay, only_unenhanced, group_filter, limit, dry_run, fetch_workers):
     """One full pass: log in, list groups, enhance every pending detection."""
     session = requests.Session()
     session.headers.update({"Accept": "application/json"})
@@ -273,20 +274,40 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
             return
         print(f"\n[*] Filtered to group: {groups[0].get('name')}")
 
-    print(f"\n[*] Fetching detections for {len(groups)} group(s)...")
+    workers = max(1, fetch_workers)
+    print(f"\n[*] Fetching detections for {len(groups)} group(s) (workers={workers})...")
     all_detections = []
-    for g in groups:
+
+    def fetch_one(g):
         group_name = g.get("name") or g.get("matchedName") or "(unnamed)"
-        group_id = g["id"]
         try:
-            detections = get_group_detections(session, host, group_id)
+            detections = get_group_detections(session, host, g["id"])
             for d in detections:
                 d["_group_name"] = group_name
-            all_detections.extend(detections)
-            print(f"    {group_name:<25} -> {len(detections)} detection(s)")
-        except requests.exceptions.HTTPError as e:
-            print(f"    {group_name:<25} -> ERROR: {e}")
-        time.sleep(0.3)
+            return group_name, detections, None
+        except Exception as e:
+            return group_name, [], e
+
+    if workers == 1:
+        for g in groups:
+            group_name, detections, err = fetch_one(g)
+            if err:
+                print(f"    {group_name:<25} -> ERROR: {err}")
+            else:
+                all_detections.extend(detections)
+                print(f"    {group_name:<25} -> {len(detections)} detection(s)")
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(fetch_one, g) for g in groups]
+            done_count = 0
+            for fut in as_completed(futures):
+                group_name, detections, err = fut.result()
+                done_count += 1
+                if err:
+                    print(f"    [{done_count:>4}/{len(groups)}] {group_name:<25} -> ERROR: {err}")
+                else:
+                    all_detections.extend(detections)
+                    print(f"    [{done_count:>4}/{len(groups)}] {group_name:<25} -> {len(detections)} detection(s)")
 
     print(f"\n[+] Total detections: {len(all_detections)}")
 
@@ -485,10 +506,12 @@ def main():
     dry_run = env_bool("DRY_RUN", False)
     run_once = env_bool("RUN_ONCE", False)
     poll_interval = env_int("POLL_INTERVAL", 300)
+    fetch_workers = env_int("FETCH_WORKERS", 8)
 
     print(f"[*] UniFi Protect Face Enhance starting")
     print(f"    host={host} user={username}")
     print(f"    poll_interval={poll_interval}s  run_once={run_once}  dry_run={dry_run}")
+    print(f"    fetch_workers={fetch_workers}")
     if group_filter:
         print(f"    group_filter={group_filter!r}")
 
@@ -498,7 +521,7 @@ def main():
         print(f"\n{'#' * 60}\n# Cycle {cycle}  {datetime.now().isoformat(timespec='seconds')}\n{'#' * 60}")
         try:
             run_cycle(host, username, password, base_delay,
-                      only_unenhanced, group_filter, limit, dry_run)
+                      only_unenhanced, group_filter, limit, dry_run, fetch_workers)
         except Exception as e:
             print(f"[!] Cycle crashed: {type(e).__name__}: {e}")
 
