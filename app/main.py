@@ -262,8 +262,32 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
 
     if only_unenhanced:
         before = len(all_detections)
-        all_detections = [d for d in all_detections if not d.get("enhancedImageId")]
-        print(f"[*] Unenhanced: {len(all_detections)} (skipped {before - len(all_detections)} already done)")
+        # Split by faceEnhanceState so we can act + report intelligently.
+        # done: already enhanced, skip silently.
+        # queued: AI Key has the task but hasn't completed it. If recent, give it time.
+        #         If old (>1h) it's almost certainly stuck — upstream RAM step failed.
+        #         Re-POSTing returns 500 either way, so don't bother.
+        # failed/missing/anything else: try POSTing — the AI Key may accept it.
+        now_ms = int(time.time() * 1000)
+        stuck_threshold_ms = 60 * 60 * 1000  # 1 hour
+        keep, stuck, fresh = [], [], []
+        for d in all_detections:
+            state = (d.get("metadata") or {}).get("faceEnhanceState")
+            if d.get("enhancedImageId") or state == "done":
+                continue
+            if state == "queued":
+                age = now_ms - (d.get("detectedAt") or now_ms)
+                if age > stuck_threshold_ms:
+                    stuck.append(d)
+                    continue
+            keep.append(d)
+            if state in (None, "", "failed"):
+                fresh.append(d)
+        all_detections = keep
+        done_count = before - len(keep) - len(stuck)
+        print(f"[*] Already enhanced (done):  {done_count}")
+        print(f"[*] Stuck (queued >1h, upstream failed):  {len(stuck)}")
+        print(f"[*] To enhance this cycle:    {len(all_detections)}  ({len(fresh)} never tried)")
 
     if limit > 0:
         all_detections = all_detections[:limit]
@@ -302,6 +326,7 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
     success = 0
     failed = 0
     skipped = 0
+    queued_stuck = 0
     consecutive_errors = 0
     auth_failed = False
     current_queue_size = stats.get("tasksInQueue", 0) if stats else 0
@@ -338,9 +363,17 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
                     time.sleep(wait)
                     continue
                 elif status_code in (409, 500):
-                    skipped += 1
+                    # 409 = conflict (already enhanced).
+                    # 500 = AI Key won't accept the task. Usually means it's already
+                    # queued AND upstream RAM failed, so it'll never complete.
+                    state = (detection.get("metadata") or {}).get("faceEnhanceState")
+                    if status_code == 500 and state == "queued":
+                        queued_stuck += 1
+                        print(f"  [{i + 1:>4}/{len(all_detections)}] ! Stuck (queued, upstream RAM failed)  {group_name}  {det_id[:16]}...")
+                    else:
+                        skipped += 1
+                        print(f"  [{i + 1:>4}/{len(all_detections)}] - Skipped (HTTP {status_code}, state={state})  {group_name}")
                     consecutive_errors = 0
-                    print(f"  [{i + 1:>4}/{len(all_detections)}] - Skipped (already enhanced or in queue)  {group_name}")
                     break
                 elif isinstance(e, requests.exceptions.ConnectionError):
                     if attempt < max_retries - 1:
@@ -394,10 +427,11 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
 
     print(f"\n{'=' * 50}")
     print(f"  Cycle done!")
-    print(f"  Enhanced:  {success}")
-    print(f"  Skipped:   {skipped}")
-    print(f"  Failed:    {failed}")
-    print(f"  Total:     {len(all_detections)}")
+    print(f"  Enhanced:    {success}")
+    print(f"  Skipped:     {skipped}")
+    print(f"  Stuck:       {queued_stuck}  (queued in AI Key, upstream RAM failed)")
+    print(f"  Failed:      {failed}")
+    print(f"  Total:       {len(all_detections)}")
     print(f"{'=' * 50}")
 
 
