@@ -6,7 +6,7 @@ face group on an interval, submits enhance jobs for any detection that
 hasn't been enhanced yet, and adaptively throttles based on the AI Key's
 200-event task queue so nothing gets dropped.
 
-Tested on **UniFi OS 5.1.x** with **Protect 7.0.104** and the **UP-AI-KEY**.
+Tested on **UniFi OS 5.1.11** with **Protect 7.1.55** and the **UP-AI-KEY**.
 
 The Protect endpoints used here are undocumented/private and may change
 between firmware versions.

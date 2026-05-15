@@ -16,7 +16,7 @@ API endpoints used (undocumented/private):
     POST /proxy/protect/api/recognition/face/detections/{id}/image/enhance
     GET  /proxy/protect/api/bootstrap (for AI Key queue stats)
 
-Tested on UniFi OS 5.1.x / Protect 7.0.104 / UP-AI-KEY.
+Tested on UniFi OS 5.1.11 / Protect 7.1.55 / UP-AI-KEY.
 """
 
 import base64
