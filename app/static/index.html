@@ -131,6 +131,20 @@
   .identity.armed .key { background: rgba(255,255,255,0.25); color: white; }
   .identity.armed .info .count, .identity.armed .info .name { color: white; }
   .identity.active { background: var(--bg-4); border-color: var(--accent); }
+  /* When the user has unnamed cards selected, identities turn into 'drop here'
+     targets — visible glow on hover makes the merge action discoverable. */
+  .sidebar.merge-mode .identity { cursor: copy; }
+  .sidebar.merge-mode .identity:hover {
+    background: rgba(67, 196, 126, 0.18);
+    border-color: var(--ok);
+  }
+  .sidebar.merge-mode .identity:hover::after {
+    content: "← merge";
+    margin-left: auto;
+    color: var(--ok);
+    font-size: 10px;
+    font-weight: 600;
+  }
   .new-id {
     display: flex; align-items: center; gap: 10px; padding: 8px;
     border-radius: 6px; cursor: pointer; margin-top: 8px;
@@ -337,7 +351,8 @@
           <span class="info" id="armed-info"></span>
           <div class="grow"></div>
           <button id="btn-delete" class="danger" disabled>Delete</button>
-          <span class="info"><span class="kbd">1</span>–<span class="kbd">9</span> merge ·
+          <span class="info">click identity to merge ·
+            <span class="kbd">1</span>–<span class="kbd">9</span> hotkeys ·
             <span class="kbd">N</span> new ·
             <span class="kbd">A</span> all ·
             <span class="kbd">Del</span> delete ·
@@ -557,13 +572,17 @@ function renderIdentities() {
         <div class="count">${g.detectionsCount} detection${g.detectionsCount === 1 ? "" : "s"}</div>
       </div>
     `;
-    row.addEventListener("click", (e) => {
-      if (e.detail === 2) return; // double-click handled separately
-      // Triage mode: click arms for merge. Detail mode: click switches identity.
-      if (state.view === "detail") openIdentity(g);
-      else armIdentity(g.id);
+    row.addEventListener("click", () => {
+      if (state.view === "detail") {
+        // In detail view, click always switches to that identity.
+        openIdentity(g);
+        return;
+      }
+      // In triage view: if cards are selected, click MERGES into this identity.
+      // If nothing is selected, click OPENS the identity's detection list.
+      if (state.selected.size > 0) mergeIntoIdentity(g.id);
+      else openIdentity(g);
     });
-    row.addEventListener("dblclick", () => openIdentity(g));
     wrap.appendChild(row);
   });
 }
@@ -608,6 +627,8 @@ function renderCards() {
     `${state.cards.length} of ${state.unenrolledTotal} unenrolled  ·  identities: ${state.identities.length}`;
   $("btn-load-more").style.display =
     state.cards.length < state.unenrolledTotal ? "" : "none";
+  // Visual cue: when cards are selected, sidebar identities become drop-targets.
+  document.querySelector(".sidebar").classList.toggle("merge-mode", state.selected.size > 0);
 }
 
 function onCardClick(e, idx) {
@@ -1137,6 +1158,7 @@ document.addEventListener("keydown", (e) => {
     state.selected.clear();
     state.armedIdentityId = null;
     $("armed-info").textContent = "";
+    document.querySelector(".sidebar").classList.remove("merge-mode");
     renderCards(); renderIdentities();
   } else if (e.key.toLowerCase() === "n") {
     promptNewIdentity();
