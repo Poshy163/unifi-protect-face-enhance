@@ -9,4 +9,4 @@ services:
       - .env
     ports:
       # Face Triage webapp — disable by setting WEBAPP_ENABLED=false in .env
-      - "8080:8080"
+      - "${WEBAPP_PORT:-8080}:${WEBAPP_PORT:-8080}"
