@@ -24,6 +24,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -507,32 +508,60 @@ def main():
     run_once = env_bool("RUN_ONCE", False)
     poll_interval = env_int("POLL_INTERVAL", 300)
     fetch_workers = env_int("FETCH_WORKERS", 8)
+    enhancer_enabled = env_bool("ENHANCER_ENABLED", True)
+    webapp_enabled = env_bool("WEBAPP_ENABLED", True)
+    webapp_port = env_int("WEBAPP_PORT", 8080)
+    webapp_host = env_str("WEBAPP_HOST", "0.0.0.0") or "0.0.0.0"
 
     print(f"[*] UniFi Protect Face Enhance starting")
     print(f"    host={host} user={username}")
-    print(f"    poll_interval={poll_interval}s  run_once={run_once}  dry_run={dry_run}")
+    print(f"    enhancer={enhancer_enabled} (poll_interval={poll_interval}s, run_once={run_once}, dry_run={dry_run})")
+    print(f"    webapp={webapp_enabled} (port={webapp_port})")
     print(f"    fetch_workers={fetch_workers}")
     if group_filter:
         print(f"    group_filter={group_filter!r}")
 
-    cycle = 0
-    while not _shutdown:
-        cycle += 1
-        print(f"\n{'#' * 60}\n# Cycle {cycle}  {datetime.now().isoformat(timespec='seconds')}\n{'#' * 60}")
+    def enhancer_loop():
+        cycle = 0
+        while not _shutdown:
+            cycle += 1
+            print(f"\n{'#' * 60}\n# Cycle {cycle}  {datetime.now().isoformat(timespec='seconds')}\n{'#' * 60}")
+            try:
+                run_cycle(host, username, password, base_delay,
+                          only_unenhanced, group_filter, limit, dry_run, fetch_workers)
+            except Exception as e:
+                print(f"[!] Cycle crashed: {type(e).__name__}: {e}")
+
+            if run_once or _shutdown:
+                break
+
+            print(f"\n[*] Sleeping {poll_interval}s before next cycle...")
+            slept = 0
+            while slept < poll_interval and not _shutdown:
+                time.sleep(min(5, poll_interval - slept))
+                slept += 5
+
+    if not webapp_enabled and not enhancer_enabled:
+        print("[!] Both WEBAPP_ENABLED and ENHANCER_ENABLED are false — nothing to do.")
+        sys.exit(1)
+
+    enhancer_thread = None
+    if enhancer_enabled:
+        enhancer_thread = threading.Thread(target=enhancer_loop, name="enhancer", daemon=True)
+        enhancer_thread.start()
+
+    if webapp_enabled:
+        from .protect_client import ProtectClient
+        from .webapp import run_webapp
+        client = ProtectClient(host, username, password)
+        print(f"[*] Webapp serving on http://{webapp_host}:{webapp_port}")
         try:
-            run_cycle(host, username, password, base_delay,
-                      only_unenhanced, group_filter, limit, dry_run, fetch_workers)
-        except Exception as e:
-            print(f"[!] Cycle crashed: {type(e).__name__}: {e}")
-
-        if run_once or _shutdown:
-            break
-
-        print(f"\n[*] Sleeping {poll_interval}s before next cycle...")
-        slept = 0
-        while slept < poll_interval and not _shutdown:
-            time.sleep(min(5, poll_interval - slept))
-            slept += 5
+            run_webapp(client, webapp_host, webapp_port)
+        except KeyboardInterrupt:
+            pass
+    elif enhancer_thread is not None:
+        # Webapp disabled — block until the enhancer thread is done.
+        enhancer_thread.join()
 
     print("[*] Exiting.")
 

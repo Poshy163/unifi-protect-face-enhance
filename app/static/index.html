@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Face Triage</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --bg-2: #161922;
+    --bg-3: #1f2430;
+    --fg: #e8eaf0;
+    --fg-dim: #9aa0a8;
+    --accent: #4f8cff;
+    --accent-2: #2d5fcc;
+    --selected: #4f8cff;
+    --danger: #e25555;
+    --ok: #43c47e;
+    --border: #2a2f3c;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    overflow: hidden;
+  }
+  header {
+    height: 56px;
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 16px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .status { color: var(--fg-dim); font-size: 13px; }
+  header .grow { flex: 1; }
+  button {
+    background: var(--bg-3);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button:hover:not(:disabled) { background: #2a3142; border-color: #3a4258; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+  button.primary:hover:not(:disabled) { background: var(--accent-2); }
+  button.danger { background: var(--danger); border-color: var(--danger); color: white; }
+
+  .layout { display: flex; height: calc(100vh - 56px); }
+  .sidebar {
+    width: 260px;
+    background: var(--bg-2);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 12px;
+  }
+  .sidebar h2 { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; margin: 4px 0 8px; }
+  .identity {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-bottom: 4px;
+    border: 1px solid transparent;
+  }
+  .identity:hover { background: var(--bg-3); }
+  .identity .key {
+    background: var(--bg-3);
+    color: var(--fg-dim);
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    flex-shrink: 0;
+    font-family: ui-monospace, "Cascadia Mono", monospace;
+  }
+  .identity img {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    object-fit: cover;
+    background: var(--bg-3);
+  }
+  .identity .info { flex: 1; min-width: 0; }
+  .identity .info .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .identity .info .count { color: var(--fg-dim); font-size: 11px; }
+  .identity.armed { background: var(--accent); }
+  .identity.armed .key { background: rgba(255,255,255,0.25); color: white; }
+  .identity.armed .info .count, .identity.armed .info .name { color: white; }
+  .new-id {
+    display: flex; align-items: center; gap: 10px; padding: 8px;
+    border-radius: 6px; cursor: pointer; margin-top: 8px;
+    border: 1px dashed var(--border); color: var(--fg-dim);
+  }
+  .new-id:hover { border-color: var(--accent); color: var(--accent); }
+
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .toolbar {
+    height: 48px;
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 12px;
+  }
+  .toolbar .info { color: var(--fg-dim); }
+  .toolbar .selected-count { color: var(--fg); font-weight: 600; }
+  .toolbar .grow { flex: 1; }
+
+  .grid {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 12px;
+    align-content: start;
+  }
+  .card {
+    background: var(--bg-2);
+    border: 2px solid transparent;
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: border-color 0.05s, transform 0.05s;
+    position: relative;
+  }
+  .card:hover { border-color: var(--border); }
+  .card.selected { border-color: var(--selected); }
+  .card.selected::after {
+    content: "✓";
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    background: var(--selected);
+    color: white;
+    border-radius: 50%;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: bold;
+  }
+  .card img {
+    width: 100%;
+    aspect-ratio: 1;
+    object-fit: cover;
+    background: var(--bg-3);
+    display: block;
+  }
+  .card .meta {
+    padding: 6px 8px;
+    font-size: 11px;
+    color: var(--fg-dim);
+    display: flex;
+    justify-content: space-between;
+  }
+  .card .meta .gid { font-family: ui-monospace, monospace; }
+  .card.flashing { animation: flash 0.4s ease-out; }
+  @keyframes flash {
+    0% { background: var(--ok); }
+    100% { background: var(--bg-2); }
+  }
+  .card.failed { animation: shake 0.3s; border-color: var(--danger); }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-3px); }
+    75% { transform: translateX(3px); }
+  }
+
+  .empty {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 48px;
+    color: var(--fg-dim);
+  }
+  .footer {
+    height: 32px;
+    background: var(--bg-2);
+    border-top: 1px solid var(--border);
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    color: var(--fg-dim);
+    font-size: 12px;
+  }
+  .toast {
+    position: fixed;
+    bottom: 48px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    opacity: 0;
+    transition: opacity 0.2s, transform 0.2s;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(-8px); }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+  .toast.ok { border-color: var(--ok); color: var(--ok); }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center; z-index: 10;
+  }
+  .modal-backdrop.show { display: flex; }
+  .modal {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    min-width: 320px;
+    max-width: 480px;
+  }
+  .modal h3 { margin: 0 0 12px; font-size: 15px; }
+  .modal p { color: var(--fg-dim); margin: 0 0 12px; font-size: 13px; }
+  .modal input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 14px;
+    margin-bottom: 12px;
+  }
+  .modal input:focus { outline: none; border-color: var(--accent); }
+  .modal .actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+  .kbd { font-family: ui-monospace, monospace; background: var(--bg-3); padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Face Triage</h1>
+    <span class="status" id="header-status">loading…</span>
+    <div class="grow"></div>
+    <button id="btn-retroactive" title="Trigger retroactive processing on the AI Key">Retroactive…</button>
+    <button id="btn-refresh">Refresh</button>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <h2>Identities</h2>
+      <div id="identities"></div>
+      <div class="new-id" id="new-identity" title="N: assign selected cards to a brand-new identity">
+        <div class="key">N</div>
+        <div class="info"><div class="name">New identity</div><div class="count">from selection</div></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="toolbar">
+        <span class="info"><span class="selected-count" id="selected-count">0</span> selected</span>
+        <span class="info" id="armed-info"></span>
+        <div class="grow"></div>
+        <span class="info"><span class="kbd">1</span>–<span class="kbd">9</span> pick identity ·
+          <span class="kbd">Enter</span> merge ·
+          <span class="kbd">Shift</span>-click range ·
+          <span class="kbd">A</span> select all ·
+          <span class="kbd">Esc</span> clear</span>
+      </div>
+
+      <div class="grid" id="grid"></div>
+
+      <div class="footer">
+        <span id="footer-info">—</span>
+        <div class="grow"></div>
+        <button id="btn-load-more" style="display:none">Load more</button>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <div class="modal-backdrop" id="modal-rename">
+    <div class="modal">
+      <h3 id="rename-title">Name new identity</h3>
+      <p id="rename-body">Selected face groups will be merged under this new name.</p>
+      <input type="text" id="rename-input" placeholder="e.g. Aunt Sue" autocomplete="off">
+      <div class="actions">
+        <button id="rename-cancel">Cancel</button>
+        <button id="rename-confirm" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modal-retro">
+    <div class="modal">
+      <h3>Retroactive processing</h3>
+      <p>Reprocess the last N events through the AI Key. Use this to unstick face detections that have <code>faceEnhanceState: queued</code> because RAM failed upstream.</p>
+      <input type="number" id="retro-count" value="5000" min="1" max="100000">
+      <div class="actions">
+        <button id="retro-cancel">Cancel</button>
+        <button id="retro-confirm" class="primary">Start</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = {
+  identities: [],
+  cards: [],
+  selected: new Set(),
+  lastClickedIdx: null,
+  armedIdentityId: null,
+  unenrolledOffset: 0,
+  unenrolledLimit: 60,
+  unenrolledTotal: 0,
+};
+
+function toast(msg, kind = "") {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "toast show " + kind;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.className = "toast"; }, 2500);
+}
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method, headers: body ? { "content-type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch {}
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  const ct = res.headers.get("content-type") || "";
+  return ct.includes("application/json") ? res.json() : res.text();
+}
+
+function renderIdentities() {
+  const wrap = $("identities");
+  wrap.innerHTML = "";
+  state.identities.forEach((g, i) => {
+    const hotkey = i < 9 ? String(i + 1) : "";
+    const row = document.createElement("div");
+    row.className = "identity" + (state.armedIdentityId === g.id ? " armed" : "");
+    row.dataset.id = g.id;
+    row.innerHTML = `
+      <div class="key">${hotkey || "•"}</div>
+      <img loading="lazy" src="/api/groups/${g.id}/avatar" onerror="this.style.opacity=0.2">
+      <div class="info">
+        <div class="name">${escapeHtml(g.name || "(unnamed)")}</div>
+        <div class="count">${g.detectionsCount} detection${g.detectionsCount === 1 ? "" : "s"}</div>
+      </div>
+    `;
+    row.addEventListener("click", () => armIdentity(g.id));
+    row.addEventListener("dblclick", () => promptRenameIdentity(g));
+    wrap.appendChild(row);
+  });
+}
+
+function renderCards() {
+  const grid = $("grid");
+  grid.innerHTML = "";
+  if (state.cards.length === 0) {
+    grid.innerHTML = `<div class="empty">No unnamed face groups. 🎉</div>`;
+  } else {
+    state.cards.forEach((g, idx) => {
+      const card = document.createElement("div");
+      card.className = "card" + (state.selected.has(g.id) ? " selected" : "");
+      card.dataset.id = g.id;
+      card.dataset.idx = idx;
+      card.innerHTML = `
+        <img loading="lazy" src="/api/groups/${g.id}/avatar" onerror="this.style.opacity=0.2">
+        <div class="meta">
+          <span class="gid">${shortId(g.id)}</span>
+          <span>${g.detectionsCount}</span>
+        </div>
+      `;
+      card.addEventListener("click", (e) => onCardClick(e, idx));
+      grid.appendChild(card);
+    });
+  }
+  $("selected-count").textContent = state.selected.size;
+  $("footer-info").textContent =
+    `${state.cards.length} of ${state.unenrolledTotal} unenrolled  ·  identities: ${state.identities.length}`;
+  $("btn-load-more").style.display =
+    state.cards.length < state.unenrolledTotal ? "" : "none";
+}
+
+function shortId(id) {
+  if (!id) return "";
+  if (id.startsWith("face_degraded_")) return "deg…" + id.slice(-4);
+  if (id.startsWith("face_")) return id;
+  return id.slice(0, 6) + "…" + id.slice(-4);
+}
+
+function escapeHtml(s) {
+  return (s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function onCardClick(e, idx) {
+  const g = state.cards[idx];
+  if (e.shiftKey && state.lastClickedIdx !== null) {
+    const [lo, hi] = [Math.min(state.lastClickedIdx, idx), Math.max(state.lastClickedIdx, idx)];
+    for (let i = lo; i <= hi; i++) state.selected.add(state.cards[i].id);
+  } else if (e.metaKey || e.ctrlKey) {
+    if (state.selected.has(g.id)) state.selected.delete(g.id);
+    else state.selected.add(g.id);
+  } else {
+    if (state.selected.has(g.id) && state.selected.size === 1) state.selected.delete(g.id);
+    else { state.selected.clear(); state.selected.add(g.id); }
+  }
+  state.lastClickedIdx = idx;
+  renderCards();
+}
+
+function armIdentity(id) {
+  state.armedIdentityId = state.armedIdentityId === id ? null : id;
+  const armed = state.identities.find(g => g.id === state.armedIdentityId);
+  $("armed-info").textContent = armed
+    ? `armed: → ${armed.name}  (Enter to merge)`
+    : "";
+  renderIdentities();
+}
+
+async function mergeIntoIdentity(identityId) {
+  const fromIds = Array.from(state.selected);
+  if (fromIds.length === 0) return toast("No cards selected", "error");
+  const target = state.identities.find(g => g.id === identityId);
+  if (!target) return toast("No target identity", "error");
+
+  // Flash the cards green
+  fromIds.forEach(id => {
+    const el = document.querySelector(`.card[data-id="${id}"]`);
+    if (el) el.classList.add("flashing");
+  });
+
+  try {
+    await api("POST", "/api/merge", { fromGroupIds: fromIds, toGroupId: identityId });
+    toast(`Merged ${fromIds.length} → ${target.name}`, "ok");
+    state.selected.clear();
+    state.armedIdentityId = null;
+    $("armed-info").textContent = "";
+    await refreshAll();
+  } catch (e) {
+    toast(`Merge failed: ${e.message}`, "error");
+    fromIds.forEach(id => {
+      const el = document.querySelector(`.card[data-id="${id}"]`);
+      if (el) { el.classList.remove("flashing"); el.classList.add("failed"); }
+    });
+  }
+}
+
+function promptNewIdentity() {
+  if (state.selected.size === 0) return toast("Select cards first", "error");
+  const modal = $("modal-rename");
+  $("rename-title").textContent = "Name new identity";
+  $("rename-body").textContent =
+    `${state.selected.size} face group(s) will become this identity.`;
+  $("rename-input").value = "";
+  $("rename-input").dataset.mode = "create";
+  modal.classList.add("show");
+  setTimeout(() => $("rename-input").focus(), 50);
+}
+
+function promptRenameIdentity(g) {
+  const modal = $("modal-rename");
+  $("rename-title").textContent = "Rename identity";
+  $("rename-body").textContent = `Was: ${g.name}`;
+  $("rename-input").value = g.name || "";
+  $("rename-input").dataset.mode = "rename";
+  $("rename-input").dataset.id = g.id;
+  modal.classList.add("show");
+  setTimeout(() => $("rename-input").select(), 50);
+}
+
+async function confirmRename() {
+  const input = $("rename-input");
+  const name = input.value.trim();
+  const mode = input.dataset.mode;
+  if (!name) return toast("Name required", "error");
+
+  try {
+    if (mode === "create") {
+      // Rename the FIRST selected unnamed group → it becomes the identity.
+      // Then merge the rest into it.
+      const ids = Array.from(state.selected);
+      const seedId = ids[0];
+      const rest = ids.slice(1);
+      await api("PATCH", `/api/identities/${seedId}`, { name });
+      if (rest.length > 0) {
+        await api("POST", "/api/merge", { fromGroupIds: rest, toGroupId: seedId });
+      }
+      toast(`Created '${name}' with ${ids.length} group(s)`, "ok");
+    } else {
+      const id = input.dataset.id;
+      await api("PATCH", `/api/identities/${id}`, { name });
+      toast(`Renamed → ${name}`, "ok");
+    }
+    $("modal-rename").classList.remove("show");
+    state.selected.clear();
+    await refreshAll();
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  }
+}
+
+async function startRetroactive() {
+  const n = parseInt($("retro-count").value, 10);
+  if (!Number.isFinite(n) || n < 1) return toast("Invalid count", "error");
+  try {
+    await api("POST", "/api/retroactive/start",
+      { numberOfEvents: n, allCameras: true, cameraIds: [] });
+    toast(`Started retroactive: ${n} events`, "ok");
+    $("modal-retro").classList.remove("show");
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  }
+}
+
+async function refreshAll() {
+  $("header-status").textContent = "loading…";
+  try {
+    const [idents, unenrolled] = await Promise.all([
+      api("GET", "/api/identities"),
+      api("GET", `/api/unenrolled?offset=0&limit=${state.unenrolledLimit}&include_degraded=false`),
+    ]);
+    state.identities = idents;
+    state.cards = unenrolled.items;
+    state.unenrolledTotal = unenrolled.total;
+    state.unenrolledOffset = unenrolled.items.length;
+    $("header-status").textContent =
+      `${idents.length} identities · ${unenrolled.total} unenrolled`;
+    renderIdentities();
+    renderCards();
+  } catch (e) {
+    $("header-status").textContent = "error";
+    toast(`Load failed: ${e.message}`, "error");
+  }
+}
+
+async function loadMore() {
+  try {
+    const more = await api("GET",
+      `/api/unenrolled?offset=${state.unenrolledOffset}&limit=${state.unenrolledLimit}&include_degraded=false`);
+    state.cards = state.cards.concat(more.items);
+    state.unenrolledOffset += more.items.length;
+    renderCards();
+  } catch (e) { toast(`Load more failed: ${e.message}`, "error"); }
+}
+
+// Wire up controls
+$("btn-refresh").addEventListener("click", refreshAll);
+$("btn-load-more").addEventListener("click", loadMore);
+$("new-identity").addEventListener("click", promptNewIdentity);
+$("rename-cancel").addEventListener("click", () => $("modal-rename").classList.remove("show"));
+$("rename-confirm").addEventListener("click", confirmRename);
+$("rename-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") confirmRename();
+  if (e.key === "Escape") $("modal-rename").classList.remove("show");
+});
+
+$("btn-retroactive").addEventListener("click", () => $("modal-retro").classList.add("show"));
+$("retro-cancel").addEventListener("click", () => $("modal-retro").classList.remove("show"));
+$("retro-confirm").addEventListener("click", startRetroactive);
+
+document.addEventListener("keydown", (e) => {
+  // Don't intercept while typing in modal inputs
+  if (document.activeElement && ["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
+  if ($("modal-rename").classList.contains("show")) return;
+  if ($("modal-retro").classList.contains("show")) return;
+
+  if (e.key >= "1" && e.key <= "9") {
+    const idx = parseInt(e.key, 10) - 1;
+    const ident = state.identities[idx];
+    if (ident && state.selected.size > 0) {
+      mergeIntoIdentity(ident.id);
+    } else if (ident) {
+      armIdentity(ident.id);
+    }
+    return;
+  }
+  if (e.key === "Enter" && state.armedIdentityId && state.selected.size > 0) {
+    mergeIntoIdentity(state.armedIdentityId);
+  } else if (e.key === "Escape") {
+    state.selected.clear();
+    state.armedIdentityId = null;
+    $("armed-info").textContent = "";
+    renderCards(); renderIdentities();
+  } else if (e.key.toLowerCase() === "n") {
+    promptNewIdentity();
+  } else if (e.key.toLowerCase() === "a") {
+    state.cards.forEach(c => state.selected.add(c.id));
+    renderCards();
+  } else if (e.key.toLowerCase() === "r") {
+    refreshAll();
+  }
+});
+
+refreshAll();
+</script>
+</body>
+</html>

@@ -7,3 +7,6 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    ports:
+      # Face Triage webapp — disable by setting WEBAPP_ENABLED=false in .env
+      - "8080:8080"

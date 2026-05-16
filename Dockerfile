@@ -15,4 +15,6 @@ RUN useradd --create-home --uid 1000 enhancer \
  && chown -R enhancer:enhancer /app
 USER enhancer
 
+EXPOSE 8080
+
 CMD ["python", "-m", "app.main"]

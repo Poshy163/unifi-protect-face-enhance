@@ -32,6 +32,24 @@ Logs:
 docker compose logs -f face-enhance
 ```
 
+## Face Triage webapp
+
+The container also serves a small built-in webapp at **http://<host>:8080** for
+fast bulk-merging of auto-clustered face groups into named identities.
+
+Keyboard-driven workflow:
+
+- **Click** unnamed face cards (or **Shift-click** for ranges, **A** for all)
+- **Press 1–9** to merge the selection into the Nth identity in the sidebar
+- **N** create a brand-new identity from the selection (rename the first card,
+  then merge the rest into it)
+- **Double-click** an identity in the sidebar to rename it
+- **Retroactive…** button kicks off `/aiprocessors/retroactive-processing/start`
+  on the AI Key — useful for unsticking face detections in `queued` state
+  because their parent event's RAM step failed
+
+Disable with `WEBAPP_ENABLED=false`.
+
 ## Configuration
 
 All config is read from environment variables — see [.env.example](.env.example)
@@ -49,6 +67,10 @@ for the full list.
 | `LIMIT` | `0` | Cap per cycle (0 = unlimited) |
 | `DRY_RUN` | `false` | List detections without enhancing |
 | `RUN_ONCE` | `false` | One cycle then exit (good for cron) |
+| `FETCH_WORKERS` | `8` | Parallel workers for fetching detections |
+| `WEBAPP_ENABLED` | `true` | Serve the Face Triage webapp on port 8080 |
+| `WEBAPP_PORT` | `8080` | Webapp port |
+| `ENHANCER_ENABLED` | `true` | Run the periodic enhance sweep |
 
 ### Create a local-only admin
 
