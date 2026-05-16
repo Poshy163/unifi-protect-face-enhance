@@ -21,15 +21,13 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 def is_named_identity(g: dict) -> bool:
     """A group is a 'named identity' if it has a user-given name and isn't degraded.
-    Auto-cluster groups have id like face_NNNN with name=None.
-    Degraded groups have id starting face_degraded_.
-    Protect can store the identity name in either 'name' or 'matchedName',
-    so we accept either — otherwise zero-detection identities like 'Helen Kubenk'
-    that only have matchedName populated end up filtered out.
+
+    Don't filter by the `face_*` id prefix — Protect keeps the original
+    auto-cluster id when you rename a group, so some real identities (created
+    early in face-recognition history) have ids like face_825 ("Carolyn Dale").
+    Trust the name field instead.
     """
     if g.get("isDegraded"):
-        return False
-    if str(g.get("id", "")).startswith("face_"):
         return False
     return bool(g.get("name") or g.get("matchedName"))
 
