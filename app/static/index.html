@@ -152,7 +152,25 @@
   }
   .new-id:hover { border-color: var(--accent); color: var(--accent); }
 
-  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+  /* Always-visible, dark-themed scrollbars for the scrollable panes.
+     Without this, Chrome's overlay scrollbars hide entirely on Windows and
+     the grid looks like it can't scroll. */
+  .sidebar, .grid {
+    scrollbar-width: thin;
+    scrollbar-color: var(--bg-4) var(--bg-2);
+  }
+  .sidebar::-webkit-scrollbar, .grid::-webkit-scrollbar { width: 12px; }
+  .sidebar::-webkit-scrollbar-track, .grid::-webkit-scrollbar-track { background: var(--bg-2); }
+  .sidebar::-webkit-scrollbar-thumb, .grid::-webkit-scrollbar-thumb {
+    background: var(--bg-4);
+    border-radius: 6px;
+    border: 2px solid var(--bg-2);
+  }
+  .sidebar::-webkit-scrollbar-thumb:hover, .grid::-webkit-scrollbar-thumb:hover {
+    background: #3a4258;
+  }
   .toolbar {
     min-height: 48px;
     background: var(--bg-2);
@@ -1056,7 +1074,11 @@ async function refreshAll() {
   }
 }
 
+let loadingMore = false;
 async function loadMore() {
+  if (loadingMore) return;
+  if (state.cards.length >= state.unenrolledTotal) return;
+  loadingMore = true;
   try {
     const more = await api("GET",
       `/api/unenrolled?offset=${state.unenrolledOffset}&limit=${state.unenrolledLimit}&include_degraded=false`);
@@ -1064,6 +1086,25 @@ async function loadMore() {
     state.unenrolledOffset += more.items.length;
     renderCards();
   } catch (e) { toast(`Load more failed: ${e.message}`, "error"); }
+  finally { loadingMore = false; }
+}
+
+let loadingDetailMore = false;
+async function loadDetailMoreOnScroll() {
+  if (loadingDetailMore || !state.detailHasMore || !state.detailIdentity) return;
+  loadingDetailMore = true;
+  state.detailPage += 1;
+  try { await loadDetectionsPage(); }
+  finally { loadingDetailMore = false; }
+}
+
+// Infinite scroll: when the user scrolls within 600px of the bottom of either
+// grid, pull the next page. Beats clicking "Load more" 25 times.
+function attachInfiniteScroll(gridEl, loader) {
+  gridEl.addEventListener("scroll", () => {
+    const nearBottom = gridEl.scrollTop + gridEl.clientHeight >= gridEl.scrollHeight - 600;
+    if (nearBottom) loader();
+  });
 }
 
 // ============================================================
@@ -1171,6 +1212,10 @@ document.addEventListener("keydown", (e) => {
     if (state.selected.size > 0) { e.preventDefault(); promptDelete(); }
   }
 });
+
+// Infinite scroll on both grids
+attachInfiniteScroll($("grid-triage"), loadMore);
+attachInfiniteScroll($("grid-detail"), loadDetailMoreOnScroll);
 
 // Poll enhancer status every 2s
 pollEnhancerStatus();
