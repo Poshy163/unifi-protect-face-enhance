@@ -32,6 +32,8 @@ from datetime import datetime
 import requests
 import urllib3
 
+from .enhancer_status import STATUS
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_PROTECT = "/proxy/protect/api"
@@ -242,12 +244,21 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
     session = requests.Session()
     session.headers.update({"Accept": "application/json"})
 
+    STATUS.state = "fetching"
+    STATUS.last_started_at = time.time()
+    STATUS.last_error = None
+    STATUS.progress_done = 0
+    STATUS.progress_total = 0
+    STATUS.current_group = None
+
     print(f"[*] Logging in to {host}...")
     try:
         csrf = login(session, host, username, password)
         print(f"[+] Logged in (CSRF: {csrf[:16]}...)")
     except requests.exceptions.HTTPError as e:
         print(f"[!] Login failed: {e}")
+        STATUS.state = "error"
+        STATUS.last_error = f"login failed: {e}"
         return
 
     print("\n[*] Fetching face groups...")
@@ -255,6 +266,8 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
         groups = get_face_groups(session, host)
     except requests.exceptions.HTTPError as e:
         print(f"[!] Failed to fetch groups: {e}")
+        STATUS.state = "error"
+        STATUS.last_error = f"fetch groups failed: {e}"
         return
 
     print(f"[+] Found {len(groups)} face group(s):\n")
@@ -347,6 +360,8 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
 
     if not all_detections:
         print("\n[*] Nothing to enhance this cycle.")
+        STATUS.last_summary = {"enhanced": 0, "skipped": 0, "stuck": 0, "failed": 0, "total": 0}
+        STATUS.last_finished_at = time.time()
         return
 
     if dry_run:
@@ -383,12 +398,18 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
     auth_failed = False
     current_queue_size = stats.get("tasksInQueue", 0) if stats else 0
 
+    STATUS.state = "enhancing"
+    STATUS.progress_total = len(all_detections)
+    STATUS.progress_done = 0
+
     for i, detection in enumerate(all_detections):
         if auth_failed or _shutdown:
             break
         det_id = detection["id"]
         group_name = detection.get("_group_name", "?")
         ts_str = format_timestamp(detection.get("detectedAt"))
+        STATUS.current_group = group_name
+        STATUS.progress_done = i
 
         max_retries = 3
         for attempt in range(max_retries):
@@ -486,6 +507,17 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
     print(f"  Total:       {len(all_detections)}")
     print(f"{'=' * 50}")
 
+    STATUS.last_summary = {
+        "enhanced": success,
+        "skipped": skipped,
+        "stuck": queued_stuck,
+        "failed": failed,
+        "total": len(all_detections),
+    }
+    STATUS.last_finished_at = time.time()
+    STATUS.progress_done = STATUS.progress_total
+    STATUS.current_group = None
+
 
 def main():
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -525,21 +557,31 @@ def main():
         cycle = 0
         while not _shutdown:
             cycle += 1
+            STATUS.cycle_number = cycle
             print(f"\n{'#' * 60}\n# Cycle {cycle}  {datetime.now().isoformat(timespec='seconds')}\n{'#' * 60}")
             try:
                 run_cycle(host, username, password, base_delay,
                           only_unenhanced, group_filter, limit, dry_run, fetch_workers)
             except Exception as e:
                 print(f"[!] Cycle crashed: {type(e).__name__}: {e}")
+                STATUS.state = "error"
+                STATUS.last_error = f"{type(e).__name__}: {e}"
 
             if run_once or _shutdown:
                 break
 
             print(f"\n[*] Sleeping {poll_interval}s before next cycle...")
+            STATUS.state = "sleeping"
+            STATUS.sleep_until = time.time() + poll_interval
             slept = 0
             while slept < poll_interval and not _shutdown:
+                if STATUS.consume_run_now():
+                    print("[*] Manual 'Run now' received — waking up.")
+                    break
                 time.sleep(min(5, poll_interval - slept))
                 slept += 5
+            STATUS.sleep_until = None
+        STATUS.state = "idle"
 
     if not webapp_enabled and not enhancer_enabled:
         print("[!] Both WEBAPP_ENABLED and ENHANCER_ENABLED are false — nothing to do.")

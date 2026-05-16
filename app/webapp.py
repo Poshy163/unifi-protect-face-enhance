@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from .enhancer_status import STATUS
 from .protect_client import BASE_PROTECT, ProtectClient
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -56,6 +57,17 @@ class RetroactiveBody(BaseModel):
     numberOfEvents: int = Field(ge=1, le=100000)
     allCameras: bool = True
     cameraIds: list[str] = []
+
+
+class DeleteBody(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class ReassignBody(BaseModel):
+    detectionIds: list[str] = Field(min_length=1, max_length=500)
+    # Target group id. Use null to unassign (the detections leave the current
+    # identity; Protect will re-cluster them on its own).
+    groupId: str | None = None
 
 
 def create_app(client: ProtectClient) -> FastAPI:
@@ -110,7 +122,9 @@ def create_app(client: ProtectClient) -> FastAPI:
         return Response(
             content=r.content,
             media_type=r.headers.get("content-type", "image/jpeg"),
-            headers={"Cache-Control": "private, max-age=60"},
+            # Avatars almost never change for a given group id. Cache hard so
+            # bulk navigation doesn't hammer the proxy.
+            headers={"Cache-Control": "private, max-age=3600, immutable"},
         )
 
     @app.get("/api/groups/{group_id}/detections")
@@ -129,6 +143,7 @@ def create_app(client: ProtectClient) -> FastAPI:
             result = client.merge_groups(body.fromGroupIds, body.toGroupId)
         except RuntimeError as e:
             raise HTTPException(400, str(e))
+        client.invalidate_groups_cache()
         return {"ok": True, "merged": len(body.fromGroupIds), "result": result}
 
     @app.patch("/api/identities/{group_id}")
@@ -139,7 +154,21 @@ def create_app(client: ProtectClient) -> FastAPI:
             result = client.rename_group(group_id, body.name)
         except RuntimeError as e:
             raise HTTPException(400, str(e))
+        client.invalidate_groups_cache()
         return group_summary(result)
+
+    @app.post("/api/groups/delete")
+    def delete_groups(body: DeleteBody) -> dict:
+        """Bulk-delete face groups (the cluster + its detections in Protect)."""
+        deleted, failed = 0, []
+        for gid in body.ids:
+            try:
+                client.delete_group(gid)
+                deleted += 1
+            except Exception as e:
+                failed.append({"id": gid, "error": str(e)[:200]})
+        client.invalidate_groups_cache()
+        return {"ok": True, "deleted": deleted, "failed": failed}
 
     @app.post("/api/retroactive/start")
     def retroactive_start(body: RetroactiveBody) -> dict:
@@ -170,6 +199,71 @@ def create_app(client: ProtectClient) -> FastAPI:
             "numberOfEvents": rp.get("numberOfEvents"),
             "tasksInQueue": stats.get("tasksInQueue"),
             "recentProcessedFaceEnhanceTasks": stats.get("recentProcessedFaceEnhanceTasks"),
+        }
+
+    # === Enhancer status (the background loop) ============================
+    @app.get("/api/enhancer/status")
+    def enhancer_status() -> dict:
+        snap = STATUS.snapshot()
+        # Splice in the AI Key queue for a one-stop status view.
+        ai = client.get_aiprocessor()
+        if ai:
+            stats = ai.get("taskStatistics") or {}
+            rp = ai.get("retroactiveProcessing") or {}
+            snap["aiKey"] = {
+                "tasksInQueue": stats.get("tasksInQueue"),
+                "recentProcessedFaceEnhanceTasks": stats.get("recentProcessedFaceEnhanceTasks"),
+                "recentProcessedRAMTasks": stats.get("recentProcessedRAMTasks"),
+                "recentProcessedSTTTasks": stats.get("recentProcessedSTTTasks"),
+                "retroactiveState": rp.get("state"),
+                "retroactiveEta": rp.get("estimatedTimeOfCompletion"),
+            }
+        return snap
+
+    @app.post("/api/enhancer/run-now")
+    def enhancer_run_now() -> dict:
+        STATUS.request_run_now()
+        return {"ok": True}
+
+    # === Per-identity detection management ================================
+    @app.get("/api/identities/{group_id}/detections")
+    def identity_detections(group_id: str, page: int = 1, pageSize: int = 50) -> Any:
+        r = client.get(
+            f"{BASE_PROTECT}/recognition/face/groups/{group_id}/detections",
+            params={"page": page, "pageSize": pageSize},
+        )
+        if r.status_code != 200:
+            raise HTTPException(r.status_code, r.text[:300])
+        return JSONResponse(r.json())
+
+    @app.get("/api/thumbnails/{thumb_id}")
+    def thumbnail(thumb_id: str) -> Response:
+        """Proxy raw face-crop thumbnails. Used by the per-identity grid."""
+        r = client.get(f"{BASE_PROTECT}/thumbnails/{thumb_id}")
+        if r.status_code != 200:
+            raise HTTPException(r.status_code, "thumbnail fetch failed")
+        return Response(
+            content=r.content,
+            media_type=r.headers.get("content-type", "image/jpeg"),
+            headers={"Cache-Control": "private, max-age=3600, immutable"},
+        )
+
+    @app.post("/api/detections/reassign")
+    def reassign_detections(body: ReassignBody) -> dict:
+        """Move detections to another identity, or pass groupId=null to
+        unassign them entirely (Protect will re-cluster)."""
+        api_body: dict = {"objectIds": body.detectionIds, "groupId": body.groupId}
+        r = client.post(
+            f"{BASE_PROTECT}/recognition/face/assign-group",
+            json=api_body,
+        )
+        if r.status_code >= 400:
+            raise HTTPException(400, f"reassign failed HTTP {r.status_code}: {r.text[:300]}")
+        client.invalidate_groups_cache()
+        return {
+            "ok": True,
+            "moved": len(body.detectionIds),
+            "to": body.groupId,
         }
 
     return app

@@ -13,6 +13,7 @@ from typing import Any
 
 import requests
 import urllib3
+from requests.adapters import HTTPAdapter
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -20,16 +21,29 @@ BASE_PROTECT = "/proxy/protect/api"
 
 
 class ProtectClient:
-    def __init__(self, host: str, username: str, password: str):
+    def __init__(self, host: str, username: str, password: str,
+                 groups_cache_ttl: float = 15.0, pool_size: int = 50):
         self.host = host
         self.username = username
         self.password = password
+        self.pool_size = pool_size
         self._session: requests.Session | None = None
         self._lock = threading.RLock()
+        # Cached list_face_groups output. The webapp hits this constantly —
+        # caching turns ~1-2s of pagination into a dict lookup.
+        self._groups_cache_ttl = groups_cache_ttl
+        self._groups_cache_at = 0.0
+        self._groups_cache_data: list[dict] | None = None
+        self._groups_cache_lock = threading.Lock()
 
     def _login_locked(self) -> None:
         session = requests.Session()
         session.headers.update({"Accept": "application/json"})
+        # Bigger urllib3 pool so dozens of concurrent avatar fetches don't queue.
+        adapter = HTTPAdapter(pool_connections=self.pool_size,
+                              pool_maxsize=self.pool_size)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
         url = f"https://{self.host}/api/auth/login"
         payload = {"username": self.username, "password": self.password, "rememberMe": True}
         resp = session.post(url, json=payload, verify=False, timeout=15)
@@ -85,8 +99,17 @@ class ProtectClient:
     def delete(self, path: str, **kwargs: Any) -> requests.Response:
         return self.request("DELETE", path, **kwargs)
 
-    def list_face_groups(self, page_size: int = 200) -> list[dict]:
-        """Paginate through every face group."""
+    def list_face_groups(self, page_size: int = 1000,
+                         force_refresh: bool = False) -> list[dict]:
+        """Paginate through every face group. TTL-cached so the webapp
+        doesn't hammer the Protect API on every page load."""
+        now = time.time()
+        with self._groups_cache_lock:
+            if (not force_refresh
+                    and self._groups_cache_data is not None
+                    and now - self._groups_cache_at < self._groups_cache_ttl):
+                return self._groups_cache_data
+
         out: list[dict] = []
         page = 1
         while True:
@@ -102,8 +125,18 @@ class ProtectClient:
             if not has_next:
                 break
             page += 1
-            time.sleep(0.1)
+            time.sleep(0.05)
+
+        with self._groups_cache_lock:
+            self._groups_cache_data = out
+            self._groups_cache_at = time.time()
         return out
+
+    def invalidate_groups_cache(self) -> None:
+        """Drop the cached groups list so the next call refetches."""
+        with self._groups_cache_lock:
+            self._groups_cache_data = None
+            self._groups_cache_at = 0.0
 
     def merge_groups(self, from_group_ids: list[str], to_group_id: str) -> dict:
         """POST /recognition/v2/merge-group"""
@@ -112,6 +145,13 @@ class ProtectClient:
         if r.status_code >= 400:
             raise RuntimeError(f"merge failed HTTP {r.status_code}: {r.text[:300]}")
         return r.json() if r.text else {}
+
+    def delete_group(self, group_id: str) -> None:
+        """DELETE /recognition/face/groups/{id} — removes the face group and
+        its detections from Protect entirely."""
+        r = self.delete(f"{BASE_PROTECT}/recognition/face/groups/{group_id}")
+        if r.status_code >= 400 and r.status_code != 404:
+            raise RuntimeError(f"delete failed HTTP {r.status_code}: {r.text[:300]}")
 
     def rename_group(self, group_id: str, name: str) -> dict:
         """PATCH /recognition/face/groups/{id}  with {name}.

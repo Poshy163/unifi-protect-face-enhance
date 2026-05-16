@@ -43,6 +43,8 @@ Keyboard-driven workflow:
 - **Press 1–9** to merge the selection into the Nth identity in the sidebar
 - **N** create a brand-new identity from the selection (rename the first card,
   then merge the rest into it)
+- **Del** (or **Backspace**) bulk-deletes selected face groups — removes the
+  cluster *and its detections* from Protect permanently
 - **Double-click** an identity in the sidebar to rename it
 - **Retroactive…** button kicks off `/aiprocessors/retroactive-processing/start`
   on the AI Key — useful for unsticking face detections in `queued` state
