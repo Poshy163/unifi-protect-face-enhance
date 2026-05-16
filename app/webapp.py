@@ -23,18 +23,21 @@ def is_named_identity(g: dict) -> bool:
     """A group is a 'named identity' if it has a user-given name and isn't degraded.
     Auto-cluster groups have id like face_NNNN with name=None.
     Degraded groups have id starting face_degraded_.
+    Protect can store the identity name in either 'name' or 'matchedName',
+    so we accept either — otherwise zero-detection identities like 'Helen Kubenk'
+    that only have matchedName populated end up filtered out.
     """
     if g.get("isDegraded"):
         return False
     if str(g.get("id", "")).startswith("face_"):
         return False
-    return bool(g.get("name"))
+    return bool(g.get("name") or g.get("matchedName"))
 
 
 def group_summary(g: dict) -> dict:
     return {
         "id": g.get("id"),
-        "name": g.get("name"),
+        "name": g.get("name") or g.get("matchedName"),
         "matchedName": g.get("matchedName"),
         "detectionsCount": g.get("detectionsCount", 0),
         "firstDetectedAt": g.get("firstDetectedAt"),
