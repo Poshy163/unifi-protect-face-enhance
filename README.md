@@ -41,11 +41,18 @@ Keyboard-driven workflow:
 
 - **Click** unnamed face cards (or **Shift-click** for ranges, **A** for all)
 - **Press 1–9** to merge the selection into the Nth identity in the sidebar
+- **Click** an identity to merge selected cards into it
+- **Drag** a card onto an identity in the sidebar to merge
 - **N** create a brand-new identity from the selection (rename the first card,
   then merge the rest into it)
 - **Del** (or **Backspace**) bulk-deletes selected face groups — removes the
   cluster *and its detections* from Protect permanently
-- **Double-click** an identity in the sidebar to rename it
+- **🤖 AI suggest** (button) — walks through unnamed cards and uses Google
+  Gemini to suggest a matching identity. You confirm each with **Y** or **N**.
+  Requires `GEMINI_API_KEY` in `.env`.
+- **Click an identity** (with no selection) to open its detail view: see all
+  detections, move them to a different identity, unassign, or delete the
+  entire identity.
 - **Retroactive…** button kicks off `/aiprocessors/retroactive-processing/start`
   on the AI Key — useful for unsticking face detections in `queued` state
   because their parent event's RAM step failed

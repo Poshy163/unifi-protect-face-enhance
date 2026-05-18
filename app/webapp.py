@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from .enhancer_status import STATUS
+from .gemini_client import build_from_env as build_gemini, is_available as gemini_available
 from .protect_client import BASE_PROTECT, ProtectClient
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -73,6 +74,7 @@ class ReassignBody(BaseModel):
 
 def create_app(client: ProtectClient) -> FastAPI:
     app = FastAPI(title="Face Triage", docs_url="/api/docs", redoc_url=None)
+    gemini = build_gemini()  # None if no GEMINI_API_KEY or SDK missing
 
     @app.get("/")
     def root() -> FileResponse:
@@ -116,15 +118,27 @@ def create_app(client: ProtectClient) -> FastAPI:
         return {"total": total, "offset": offset, "limit": limit, "items": page}
 
     @app.get("/api/groups/{group_id}/avatar")
-    def avatar(group_id: str) -> Response:
+    def avatar(group_id: str, enhanced: bool = Query(True)) -> Response:
+        """Group cover image. By default we serve an *enhanced* face crop from
+        one of the group's detections (much clearer than the raw avatar);
+        pass ?enhanced=false to force the raw group image."""
+        if enhanced:
+            eid = client.find_enhanced_id_for_group(group_id)
+            if eid:
+                r = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{eid}")
+                if r.status_code == 200:
+                    return Response(
+                        content=r.content,
+                        media_type=r.headers.get("content-type", "image/jpeg"),
+                        headers={"Cache-Control": "private, max-age=3600, immutable"},
+                    )
+        # Fall back to the raw group avatar.
         r = client.get(f"{BASE_PROTECT}/recognition/face/groups/{group_id}/image")
         if r.status_code != 200:
             raise HTTPException(r.status_code, "avatar fetch failed")
         return Response(
             content=r.content,
             media_type=r.headers.get("content-type", "image/jpeg"),
-            # Avatars almost never change for a given group id. Cache hard so
-            # bulk navigation doesn't hammer the proxy.
             headers={"Cache-Control": "private, max-age=3600, immutable"},
         )
 
@@ -238,9 +252,16 @@ def create_app(client: ProtectClient) -> FastAPI:
         return JSONResponse(r.json())
 
     @app.get("/api/thumbnails/{thumb_id}")
-    def thumbnail(thumb_id: str) -> Response:
-        """Proxy raw face-crop thumbnails. Used by the per-identity grid."""
-        r = client.get(f"{BASE_PROTECT}/thumbnails/{thumb_id}")
+    def thumbnail(thumb_id: str, enhanced: bool = Query(False)) -> Response:
+        """Proxy face-crop thumbnails.
+
+        - `?enhanced=false` (default) fetches the raw face crop via
+          /thumbnails/{id}. Use this with `detection.thumbnailId`.
+        - `?enhanced=true` fetches the enhanced version via
+          /thumbnails/enhanced/{id}. Use this with `detection.enhancedImageId`.
+        """
+        path = f"{BASE_PROTECT}/thumbnails/{'enhanced/' if enhanced else ''}{thumb_id}"
+        r = client.get(path)
         if r.status_code != 200:
             raise HTTPException(r.status_code, "thumbnail fetch failed")
         return Response(
@@ -266,6 +287,57 @@ def create_app(client: ProtectClient) -> FastAPI:
             "moved": len(body.detectionIds),
             "to": body.groupId,
         }
+
+    # === AI suggestion (Gemini) ==========================================
+    @app.get("/api/ai/status")
+    def ai_status() -> dict:
+        return {
+            "available": gemini is not None,
+            "sdk_installed": gemini_available(),
+        }
+
+    @app.get("/api/ai/suggest")
+    def ai_suggest(groupId: str) -> dict:
+        """Ask Gemini which known identity (if any) matches an unnamed group.
+
+        Returns {identityId, name, confidence, reason}. Cached per (groupId, identity-set).
+        """
+        if gemini is None:
+            raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY.")
+
+        # Fetch the query face — prefer the enhanced version for clarity.
+        eid = client.find_enhanced_id_for_group(groupId)
+        if eid:
+            r_img = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{eid}")
+        else:
+            r_img = client.get(f"{BASE_PROTECT}/recognition/face/groups/{groupId}/image")
+        if r_img.status_code != 200:
+            raise HTTPException(404, "could not fetch group image")
+        query_image = r_img.content
+
+        # Identity reference images (also enhanced when available).
+        groups = client.list_face_groups()
+        identities_raw = [g for g in groups if is_named_identity(g)]
+        identities: list[dict] = []
+        for g in identities_raw:
+            gid = g["id"]
+            iid = client.find_enhanced_id_for_group(gid)
+            if iid:
+                ir = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{iid}")
+            else:
+                ir = client.get(f"{BASE_PROTECT}/recognition/face/groups/{gid}/image")
+            if ir.status_code == 200:
+                identities.append({"id": gid, "name": g.get("name") or g.get("matchedName") or gid,
+                                   "image": ir.content})
+
+        if not identities:
+            raise HTTPException(400, "no known identities to compare against")
+
+        try:
+            result = gemini.suggest(query_image, identities, cache_key=groupId)
+        except Exception as e:
+            raise HTTPException(500, f"Gemini call failed: {type(e).__name__}: {e}")
+        return result
 
     return app
 

@@ -138,6 +138,42 @@ class ProtectClient:
             self._groups_cache_data = None
             self._groups_cache_at = 0.0
 
+    def find_enhanced_id_for_group(self, group_id: str) -> str | None:
+        """Return the first enhancedImageId in the group's detections, or None.
+
+        Used to swap the group's reference avatar for an enhanced face crop.
+        TTL-cached per group via _enhanced_id_cache.
+        """
+        cache_attr = "_enhanced_id_cache"
+        lock_attr = "_enhanced_id_lock"
+        if not hasattr(self, lock_attr):
+            setattr(self, lock_attr, threading.Lock())
+            setattr(self, cache_attr, {})  # group_id -> (timestamp, id-or-None)
+        lock = getattr(self, lock_attr)
+        cache = getattr(self, cache_attr)
+        now = time.time()
+        with lock:
+            if group_id in cache:
+                t, val = cache[group_id]
+                if now - t < 600:  # 10 minutes
+                    return val
+        # Fetch outside the lock.
+        try:
+            r = self.get(
+                f"{BASE_PROTECT}/recognition/face/groups/{group_id}/detections",
+                params={"page": 1, "pageSize": 10},
+            )
+            if r.status_code == 200:
+                dets = r.json().get("detections", [])
+                eid = next((d.get("enhancedImageId") for d in dets if d.get("enhancedImageId")), None)
+            else:
+                eid = None
+        except Exception:
+            eid = None
+        with lock:
+            cache[group_id] = (time.time(), eid)
+        return eid
+
     def merge_groups(self, from_group_ids: list[str], to_group_id: str) -> dict:
         """POST /recognition/v2/merge-group"""
         r = self.post(f"{BASE_PROTECT}/recognition/v2/merge-group",

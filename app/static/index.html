@@ -260,6 +260,46 @@
     100% { background: var(--bg-2); }
   }
   .card.failed { animation: shake 0.3s; border-color: var(--danger); }
+  .card.dragging { opacity: 0.4; }
+  .identity.drop-target {
+    background: rgba(67, 196, 126, 0.22);
+    border-color: var(--ok);
+    transform: scale(1.02);
+  }
+
+  /* AI-suggest overlay shown on cards in suggest mode */
+  .ai-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(0,0,0,0.0) 50%, rgba(0,0,0,0.9) 100%);
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 6px 8px;
+    pointer-events: none;
+  }
+  .ai-overlay .name {
+    color: var(--ok);
+    font-weight: 600;
+    font-size: 12px;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  }
+  .ai-overlay .conf {
+    color: var(--fg-dim);
+    font-size: 10px;
+  }
+  .ai-overlay.low .name { color: var(--warn); }
+  .ai-overlay.unknown .name { color: var(--fg-dim); }
+  .ai-loading {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    background: rgba(0,0,0,0.6);
+    color: white;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
   @keyframes shake {
     0%, 100% { transform: translateX(0); }
     25% { transform: translateX(-3px); }
@@ -379,13 +419,14 @@
           <span class="info"><span class="selected-count" id="selected-count">0</span> selected</span>
           <span class="info" id="armed-info"></span>
           <div class="grow"></div>
+          <button id="btn-ai-suggest" title="Use Gemini to suggest identities for unnamed faces">🤖 AI suggest</button>
           <button id="btn-delete" class="danger" disabled>Delete</button>
-          <span class="info">click identity to merge ·
-            <span class="kbd">1</span>–<span class="kbd">9</span> hotkeys ·
+          <span class="info">drag onto identity · click to merge ·
+            <span class="kbd">1</span>–<span class="kbd">9</span> ·
             <span class="kbd">N</span> new ·
             <span class="kbd">A</span> all ·
-            <span class="kbd">Del</span> delete ·
-            <span class="kbd">Esc</span> clear</span>
+            <span class="kbd">Del</span> ·
+            <span class="kbd">Esc</span></span>
         </div>
         <div class="grid" id="grid-triage"></div>
         <div class="footer">
@@ -469,6 +510,35 @@
       <div class="actions">
         <button id="reassign-cancel">Cancel</button>
         <button id="reassign-confirm" class="primary">Move</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI suggest review modal (Y/N walk through unnamed cards) -->
+  <div class="modal-backdrop" id="modal-ai">
+    <div class="modal" style="min-width:480px">
+      <h3>AI suggest · <span id="ai-progress">—</span></h3>
+      <p id="ai-status">…</p>
+      <div style="display:flex;gap:16px;align-items:center;justify-content:center;margin:8px 0 16px">
+        <div style="text-align:center">
+          <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">Unnamed face</div>
+          <img id="ai-query-img" style="width:140px;height:140px;object-fit:cover;border-radius:8px;background:var(--bg-3)">
+        </div>
+        <div style="font-size:24px;color:var(--fg-dim)">→</div>
+        <div style="text-align:center">
+          <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">Gemini suggests</div>
+          <img id="ai-suggest-img" style="width:140px;height:140px;object-fit:cover;border-radius:8px;background:var(--bg-3)">
+          <div style="margin-top:6px"><span id="ai-suggest-name" style="font-weight:600">—</span></div>
+          <div><span id="ai-suggest-conf" style="font-size:11px;color:var(--fg-dim)">—</span></div>
+        </div>
+      </div>
+      <div id="ai-reason" style="font-size:12px;color:var(--fg-dim);text-align:center;margin-bottom:12px"></div>
+      <div class="actions" style="justify-content:space-between">
+        <button id="ai-stop">Stop</button>
+        <div style="display:flex;gap:8px">
+          <button id="ai-no">N · Skip</button>
+          <button id="ai-yes" class="primary">Y · Merge</button>
+        </div>
       </div>
     </div>
   </div>
@@ -603,14 +673,30 @@ function renderIdentities() {
     `;
     row.addEventListener("click", () => {
       if (state.view === "detail") {
-        // In detail view, click always switches to that identity.
         openIdentity(g);
         return;
       }
-      // In triage view: if cards are selected, click MERGES into this identity.
-      // If nothing is selected, click OPENS the identity's detection list.
       if (state.selected.size > 0) mergeIntoIdentity(g.id);
       else openIdentity(g);
+    });
+    // Drag-and-drop target: dropping unnamed cards onto an identity merges them.
+    row.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      row.classList.add("drop-target");
+      e.dataTransfer.dropEffect = "copy";
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("drop-target"));
+    row.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      row.classList.remove("drop-target");
+      const ids = readDragIds(e);
+      if (ids.length === 0) return;
+      try {
+        await api("POST", "/api/merge", { fromGroupIds: ids, toGroupId: g.id });
+        toast(`Merged ${ids.length} → ${g.name}`, "ok");
+        state.selected.clear();
+        await refreshAll();
+      } catch (err) { toast(`Merge failed: ${err.message}`, "error"); }
     });
     wrap.appendChild(row);
   });
@@ -639,6 +725,7 @@ function renderCards() {
       card.className = "card" + (state.selected.has(g.id) ? " selected" : "");
       card.dataset.id = g.id;
       card.dataset.idx = idx;
+      card.draggable = true;
       card.innerHTML = `
         <img loading="lazy" src="/api/groups/${g.id}/avatar" onerror="this.style.opacity=0.2">
         <div class="meta"><div class="row">
@@ -647,6 +734,8 @@ function renderCards() {
         </div></div>
       `;
       card.addEventListener("click", (e) => onCardClick(e, idx));
+      card.addEventListener("dragstart", (e) => onCardDragStart(e, g.id));
+      card.addEventListener("dragend", (e) => onCardDragEnd(e));
       grid.appendChild(card);
     });
   }
@@ -701,6 +790,38 @@ async function mergeIntoIdentity(identityId) {
       if (el) { el.classList.remove("flashing"); el.classList.add("failed"); }
     });
   }
+}
+
+// ============================================================
+// DRAG AND DROP
+// ============================================================
+function onCardDragStart(e, gid) {
+  // If the dragged card is part of the current selection, drag the whole
+  // selection. Otherwise, drag just this one card.
+  const ids = state.selected.has(gid) && state.selected.size > 0
+    ? Array.from(state.selected)
+    : [gid];
+  e.dataTransfer.effectAllowed = "copy";
+  e.dataTransfer.setData("application/x-face-ids", JSON.stringify(ids));
+  // Fallback for browsers that strip the custom type
+  e.dataTransfer.setData("text/plain", ids.join(","));
+  ids.forEach(id => {
+    const el = document.querySelector(`.card[data-id="${id}"]`);
+    if (el) el.classList.add("dragging");
+  });
+}
+function onCardDragEnd() {
+  document.querySelectorAll(".card.dragging").forEach(el => el.classList.remove("dragging"));
+  document.querySelectorAll(".identity.drop-target").forEach(el => el.classList.remove("drop-target"));
+}
+function readDragIds(e) {
+  let raw = e.dataTransfer.getData("application/x-face-ids");
+  if (!raw) raw = e.dataTransfer.getData("text/plain");
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : raw.split(",");
+  } catch { return raw.split(","); }
 }
 
 // ============================================================
@@ -1046,6 +1167,108 @@ function renderEnhancerModal(s) {
 }
 
 // ============================================================
+// AI SUGGEST MODE — walk through unnamed cards, ask Gemini, confirm Y/N
+// ============================================================
+const ai = { running: false, queue: [], current: null, currentSuggest: null };
+
+async function startAiMode() {
+  // Check Gemini is reachable
+  let st;
+  try { st = await api("GET", "/api/ai/status"); }
+  catch (e) { toast(`AI status check failed: ${e.message}`, "error"); return; }
+  if (!st.available) {
+    toast("Gemini not configured. Set GEMINI_API_KEY env var.", "error");
+    return;
+  }
+  if (state.cards.length === 0) {
+    toast("No unnamed faces to suggest", "error");
+    return;
+  }
+  ai.running = true;
+  // Queue is a copy of currently visible unnamed cards (in display order)
+  ai.queue = state.cards.map(c => c.id);
+  ai.current = null;
+  ai.currentSuggest = null;
+  $("modal-ai").classList.add("show");
+  await stepAi();
+}
+
+function endAiMode(msg) {
+  ai.running = false;
+  ai.queue = [];
+  ai.current = null;
+  ai.currentSuggest = null;
+  $("modal-ai").classList.remove("show");
+  if (msg) toast(msg, "ok");
+}
+
+async function stepAi() {
+  if (!ai.running) return;
+  const total = state.cards.length;
+  const done = total - ai.queue.length;
+  $("ai-progress").textContent = `${done + 1} / ${total}`;
+  if (ai.queue.length === 0) { endAiMode("AI suggest complete"); return; }
+
+  const groupId = ai.queue.shift();
+  ai.current = groupId;
+  $("ai-query-img").src = `/api/groups/${groupId}/avatar`;
+  $("ai-suggest-img").src = "";
+  $("ai-suggest-name").textContent = "…thinking";
+  $("ai-suggest-conf").textContent = "";
+  $("ai-reason").textContent = "";
+  $("ai-status").textContent = "Asking Gemini…";
+  $("ai-yes").disabled = true;
+
+  let suggest;
+  try {
+    suggest = await api("GET", `/api/ai/suggest?groupId=${encodeURIComponent(groupId)}`);
+  } catch (e) {
+    $("ai-status").textContent = `Failed: ${e.message}`;
+    $("ai-suggest-name").textContent = "—";
+    return; // user can still press N to skip
+  }
+  ai.currentSuggest = suggest;
+
+  if (!suggest.identityId) {
+    $("ai-status").textContent = "No confident match";
+    $("ai-suggest-img").src = "";
+    $("ai-suggest-name").textContent = "Unknown";
+    $("ai-suggest-name").style.color = "var(--fg-dim)";
+    $("ai-suggest-conf").textContent = `confidence ${Math.round((suggest.confidence||0)*100)}%`;
+    $("ai-reason").textContent = suggest.reason || "";
+    $("ai-yes").disabled = true;
+  } else {
+    $("ai-status").textContent = "Press Y to merge, N to skip";
+    $("ai-suggest-img").src = `/api/groups/${suggest.identityId}/avatar`;
+    $("ai-suggest-name").textContent = suggest.name;
+    $("ai-suggest-name").style.color = suggest.confidence >= 0.75 ? "var(--ok)" : "var(--warn)";
+    $("ai-suggest-conf").textContent = `confidence ${Math.round(suggest.confidence*100)}%`;
+    $("ai-reason").textContent = suggest.reason || "";
+    $("ai-yes").disabled = false;
+  }
+}
+
+async function aiYes() {
+  if (!ai.currentSuggest?.identityId || !ai.current) return;
+  try {
+    await api("POST", "/api/merge", { fromGroupIds: [ai.current], toGroupId: ai.currentSuggest.identityId });
+    toast(`Merged → ${ai.currentSuggest.name}`, "ok");
+    // Remove this card from the displayed list optimistically
+    state.cards = state.cards.filter(c => c.id !== ai.current);
+    renderCards();
+    await refreshIdentities();
+  } catch (e) {
+    toast(`Merge failed: ${e.message}`, "error");
+  }
+  await stepAi();
+}
+
+function aiNo() {
+  // Skip this card; it stays in unenrolled.
+  stepAi();
+}
+
+// ============================================================
 // DATA LOADING
 // ============================================================
 async function refreshIdentities() {
@@ -1152,6 +1375,11 @@ $("btn-detail-load-more").addEventListener("click", async () => {
 $("reassign-cancel").addEventListener("click", () => $("modal-reassign").classList.remove("show"));
 $("reassign-confirm").addEventListener("click", confirmReassign);
 
+$("btn-ai-suggest").addEventListener("click", startAiMode);
+$("ai-yes").addEventListener("click", aiYes);
+$("ai-no").addEventListener("click", aiNo);
+$("ai-stop").addEventListener("click", () => endAiMode("AI suggest stopped"));
+
 $("enhancer-pill").addEventListener("click", async () => {
   await pollEnhancerStatus();
   $("modal-enhancer").classList.add("show");
@@ -1177,6 +1405,12 @@ document.addEventListener("keydown", (e) => {
   if ($("modal-delete").classList.contains("show")) {
     if (e.key === "Enter") confirmDelete();
     if (e.key === "Escape") $("modal-delete").classList.remove("show");
+    return;
+  }
+  if ($("modal-ai").classList.contains("show")) {
+    if (e.key.toLowerCase() === "y") aiYes();
+    else if (e.key.toLowerCase() === "n") aiNo();
+    else if (e.key === "Escape") endAiMode("AI suggest stopped");
     return;
   }
 
