@@ -131,6 +131,58 @@ class GeminiClient:
                 self._cache[(cache_key, fp)] = result
         return result
 
+    def pick_best_avatar(self, candidate_images: list[bytes]) -> dict[str, Any]:
+        """Given N face crops of the same person, return the index of the
+        best one to use as a face-recognition reference photo.
+
+        Returns: {"index": int, "reason": str}
+        """
+        if not candidate_images:
+            return {"index": 0, "reason": "no candidates"}
+        if len(candidate_images) == 1:
+            return {"index": 0, "reason": "only one candidate"}
+
+        parts: list[Any] = []
+        parts.append(
+            "You are picking the BEST reference photo for a face-recognition "
+            "system. This single photo will represent the person — so it must "
+            "be the clearest possible match for future detections.\n\n"
+            "Score each candidate on:\n"
+            "  • Sharpness (in focus, no motion blur)\n"
+            "  • Frontal angle (face squarely to camera, NOT turned)\n"
+            "  • Lighting (even, not deep shadow, not blown out)\n"
+            "  • Visibility (no sunglasses, hats covering eyes, masks)\n"
+            "  • Eyes open and visible\n"
+            "  • Neutral expression preferred over extreme expressions\n\n"
+            "All candidates are the same person. Pick the single best.\n"
+        )
+        for i, img in enumerate(candidate_images):
+            parts.append(f"CANDIDATE {i}:")
+            parts.append(genai_types.Part.from_bytes(data=img, mime_type="image/jpeg"))
+        parts.append(
+            "Reply with STRICT JSON only — no markdown, no commentary.\n"
+            'Schema: {"index": <integer 0-based>, "reason": "<one short sentence>"}'
+        )
+
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=parts,
+            config=genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+        try:
+            obj = json.loads(response.text or "{}")
+        except Exception:
+            obj = {}
+
+        idx = obj.get("index")
+        if not isinstance(idx, int) or idx < 0 or idx >= len(candidate_images):
+            idx = 0
+        reason = (obj.get("reason") or "")[:200]
+        return {"index": idx, "reason": reason}
+
 
 def build_from_env() -> GeminiClient | None:
     """Return a client if GEMINI_API_KEY is set and the SDK is installed."""

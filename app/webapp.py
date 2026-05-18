@@ -133,7 +133,7 @@ def create_app(client: ProtectClient) -> FastAPI:
 
     @app.get("/api/unenrolled")
     def list_unenrolled(
-        include_degraded: bool = Query(False),
+        include_degraded: bool = Query(True),
         include_phantoms: bool = Query(True),
         min_detections: int = Query(1, ge=0),
         offset: int = Query(0, ge=0),
@@ -146,6 +146,8 @@ def create_app(client: ProtectClient) -> FastAPI:
           referenced by recent face events but missing from the listing —
           that's where freshly-created clusters and the bulk of degraded
           singletons live. Protect's UI shows these; we missed them before.
+        - `include_degraded=true` (default) keeps Protect's "low quality"
+          face clusters. Set false to hide single-detection junk crops.
         """
         groups = client.list_face_groups()
         unnamed = []
@@ -391,6 +393,69 @@ def create_app(client: ProtectClient) -> FastAPI:
         client.invalidate_groups_cache()
         invalidate_ref_image(group_id)
         return {"ok": True, "enhancedImageId": body.enhancedImageId}
+
+    @app.post("/api/identities/{group_id}/best-avatar-ai")
+    def apply_best_avatar_ai(group_id: str, max_candidates: int = Query(12, ge=2, le=20)) -> dict:
+        """Let Gemini pick the best reference photo from the identity's top
+        enhanced candidates, then upload it as the cluster avatar."""
+        if gemini is None:
+            raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY.")
+
+        # Reuse the candidate-ranking logic
+        all_dets: list[dict] = []
+        for page in range(1, 4):
+            r = client.get(
+                f"{BASE_PROTECT}/recognition/face/groups/{group_id}/detections",
+                params={"page": page, "pageSize": 100},
+            )
+            if r.status_code != 200:
+                break
+            batch = r.json().get("detections", [])
+            if not batch:
+                break
+            all_dets.extend(batch)
+            if len(batch) < 100:
+                break
+        if not all_dets:
+            raise HTTPException(404, "no detections for this identity")
+
+        enhanced = [d for d in all_dets if d.get("enhancedImageId")]
+        if not enhanced:
+            raise HTTPException(400, "no enhanced detections yet — run the enhancer first")
+        enhanced.sort(key=lambda d: d.get("matchedGroupConfidence") or 0, reverse=True)
+        top = enhanced[:max_candidates]
+
+        # Fetch all candidate images in parallel
+        def fetch_one(d: dict) -> bytes | None:
+            r = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{d['enhancedImageId']}")
+            return r.content if r.status_code == 200 else None
+
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            results = list(ex.map(fetch_one, top))
+
+        pairs = [(d, img) for d, img in zip(top, results) if img]
+        if not pairs:
+            raise HTTPException(500, "could not fetch any candidate images")
+
+        try:
+            choice = gemini.pick_best_avatar([img for _, img in pairs])
+        except Exception as e:
+            raise HTTPException(500, f"Gemini call failed: {type(e).__name__}: {e}")
+
+        chosen_det, chosen_img = pairs[choice["index"]]
+        try:
+            client.upload_group_image(group_id, chosen_img)
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        client.invalidate_groups_cache()
+        invalidate_ref_image(group_id)
+        return {
+            "ok": True,
+            "enhancedImageId": chosen_det["enhancedImageId"],
+            "detectionId": chosen_det["id"],
+            "candidatesConsidered": len(pairs),
+            "reason": choice["reason"],
+        }
 
     @app.post("/api/detections/reassign")
     def reassign_detections(body: ReassignBody) -> dict:

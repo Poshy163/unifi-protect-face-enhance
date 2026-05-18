@@ -427,6 +427,10 @@
           <span class="info"><span class="selected-count" id="selected-count">0</span> selected</span>
           <span class="info" id="armed-info"></span>
           <div class="grow"></div>
+          <label class="info" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" id="toggle-degraded" checked>
+            <span>Show low-quality</span>
+          </label>
           <button id="btn-ai-suggest" title="Use Gemini to suggest identities for unnamed faces">🤖 AI suggest</button>
           <button id="btn-delete" class="danger" disabled>Delete</button>
           <span class="info">drag onto identity · click to merge ·
@@ -540,6 +544,7 @@
       </div>
       <div class="actions">
         <button id="best-avatar-cancel">Cancel</button>
+        <button id="best-avatar-ai" class="primary" title="Let Gemini pick the clearest, most frontal photo">🤖 Let AI pick</button>
       </div>
     </div>
   </div>
@@ -1133,6 +1138,11 @@ async function openBestAvatarPicker() {
   $("best-avatar-name").textContent = g.name || "(unnamed)";
   $("best-avatar-current").src = `/api/groups/${g.id}/avatar?enhanced=false&v=${state.avatarVersion}`;
   $("best-avatar-candidates").innerHTML = "<div style='color:var(--fg-dim);padding:8px'>Loading candidates…</div>";
+  // Hide the "Let AI pick" button if Gemini isn't reachable
+  try {
+    const st = await api("GET", "/api/ai/status");
+    $("best-avatar-ai").style.display = st.available ? "" : "none";
+  } catch { $("best-avatar-ai").style.display = "none"; }
   $("modal-best-avatar").classList.add("show");
 
   let res;
@@ -1166,6 +1176,31 @@ async function openBestAvatarPicker() {
     tile.addEventListener("click", () => applyBestAvatar(c.enhancedImageId));
     wrap.appendChild(tile);
   });
+}
+
+async function letAiPickBestAvatar() {
+  if (!state.detailIdentity) return;
+  const g = state.detailIdentity;
+  const btn = $("best-avatar-ai");
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "🤖 Thinking…";
+  try {
+    const res = await api("POST", `/api/identities/${g.id}/best-avatar-ai`);
+    toast(`AI picked: ${res.reason || "best match"}`, "ok");
+    $("modal-best-avatar").classList.remove("show");
+    bumpAvatarVersion();
+    $("detail-avatar").src = avatarUrl(g.id);
+    document.querySelectorAll(`img[src*="/api/groups/${g.id}/avatar"]`).forEach(img => {
+      img.src = avatarUrl(g.id);
+    });
+    await refreshIdentities();
+  } catch (e) {
+    toast(`AI pick failed: ${e.message}`, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
 }
 
 async function applyBestAvatar(enhancedImageId) {
@@ -1425,12 +1460,17 @@ async function refreshIdentities() {
   }
 }
 
+function unenrolledUrl(offset) {
+  const includeDegraded = $("toggle-degraded")?.checked ?? true;
+  return `/api/unenrolled?offset=${offset}&limit=${state.unenrolledLimit}&include_degraded=${includeDegraded}`;
+}
+
 async function refreshAll() {
   $("header-status").textContent = "loading…";
   try {
     const [idents, unenrolled] = await Promise.all([
       api("GET", "/api/identities"),
-      api("GET", `/api/unenrolled?offset=0&limit=${state.unenrolledLimit}&include_degraded=false`),
+      api("GET", unenrolledUrl(0)),
     ]);
     state.identities = idents;
     state.cards = unenrolled.items;
@@ -1458,8 +1498,7 @@ async function loadMore() {
   if (state.cards.length >= state.unenrolledTotal) return;
   loadingMore = true;
   try {
-    const more = await api("GET",
-      `/api/unenrolled?offset=${state.unenrolledOffset}&limit=${state.unenrolledLimit}&include_degraded=false`);
+    const more = await api("GET", unenrolledUrl(state.unenrolledOffset));
     state.cards = state.cards.concat(more.items);
     state.unenrolledOffset += more.items.length;
     renderCards();
@@ -1490,6 +1529,7 @@ function attachInfiniteScroll(gridEl, loader) {
 // ============================================================
 $("btn-refresh").addEventListener("click", refreshAll);
 $("btn-load-more").addEventListener("click", loadMore);
+$("toggle-degraded").addEventListener("change", () => refreshAll());
 $("new-identity").addEventListener("click", promptNewIdentity);
 
 $("rename-cancel").addEventListener("click", () => $("modal-rename").classList.remove("show"));
@@ -1514,6 +1554,7 @@ $("btn-detail-reassign").addEventListener("click", promptReassign);
 $("btn-detail-unassign").addEventListener("click", unassignSelected);
 $("btn-detail-delete-id").addEventListener("click", deleteCurrentIdentity);
 $("best-avatar-cancel").addEventListener("click", () => $("modal-best-avatar").classList.remove("show"));
+$("best-avatar-ai").addEventListener("click", letAiPickBestAvatar);
 $("btn-detail-load-more").addEventListener("click", async () => {
   state.detailPage += 1;
   await loadDetectionsPage();
