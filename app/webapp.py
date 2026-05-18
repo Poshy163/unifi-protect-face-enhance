@@ -134,11 +134,19 @@ def create_app(client: ProtectClient) -> FastAPI:
     @app.get("/api/unenrolled")
     def list_unenrolled(
         include_degraded: bool = Query(False),
+        include_phantoms: bool = Query(True),
         min_detections: int = Query(1, ge=0),
         offset: int = Query(0, ge=0),
         limit: int = Query(60, ge=1, le=500),
     ) -> dict:
-        """List unnamed face groups (auto-clusters), sorted by most-recent first."""
+        """Every unnamed face cluster, sorted by most-recent first.
+
+        - Pulls listed groups from /recognition/face/groups.
+        - When `include_phantoms` is true (default), ALSO harvests group IDs
+          referenced by recent face events but missing from the listing —
+          that's where freshly-created clusters and the bulk of degraded
+          singletons live. Protect's UI shows these; we missed them before.
+        """
         groups = client.list_face_groups()
         unnamed = []
         for g in groups:
@@ -149,6 +157,15 @@ def create_app(client: ProtectClient) -> FastAPI:
             if (g.get("detectionsCount") or 0) < min_detections:
                 continue
             unnamed.append(group_summary(g))
+
+        if include_phantoms:
+            for g in client.harvest_phantom_groups():
+                if g.get("isDegraded") and not include_degraded:
+                    continue
+                if (g.get("detectionsCount") or 0) < min_detections:
+                    continue
+                unnamed.append(group_summary(g))
+
         unnamed.sort(key=lambda g: g.get("lastDetectedAt") or 0, reverse=True)
         total = len(unnamed)
         page = unnamed[offset:offset + limit]

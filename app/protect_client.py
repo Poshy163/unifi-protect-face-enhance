@@ -138,6 +138,80 @@ class ProtectClient:
             self._groups_cache_data = None
             self._groups_cache_at = 0.0
 
+    def harvest_phantom_groups(self, window_hours: int = 168,
+                               cache_ttl: float = 10.0) -> list[dict]:
+        """Walk recent smartDetectZone events and return synthetic records
+        for every face group referenced that isn't in /recognition/face/groups.
+
+        Protect's listing endpoint only returns 'committed' face groups; new
+        clusters and most face_degraded_* singletons don't appear there, even
+        though their detections exist and can be fetched per-id. This bridges
+        that gap so the UI shows every face Protect has seen.
+        """
+        cache_attr = "_phantom_cache"
+        lock_attr = "_phantom_lock"
+        if not hasattr(self, lock_attr):
+            setattr(self, lock_attr, threading.Lock())
+            setattr(self, cache_attr, {"at": 0.0, "data": []})
+        lock = getattr(self, lock_attr)
+        cache = getattr(self, cache_attr)
+        now = time.time()
+        with lock:
+            if now - cache["at"] < cache_ttl:
+                return cache["data"]
+
+        listed = {g["id"] for g in self.list_face_groups()}
+        end_ms = int(now * 1000)
+        start_ms = end_ms - window_hours * 3600 * 1000
+
+        r = self.get(
+            f"{BASE_PROTECT}/events",
+            params={"start": start_ms, "end": end_ms,
+                    "type": "smartDetectZone", "limit": 500},
+            timeout=60,
+        )
+        if r.status_code != 200:
+            return []
+
+        # group_id -> {count, last_ts}
+        seen: dict[str, dict] = {}
+        for ev in r.json():
+            ts = ev.get("start") or 0
+            for t in ((ev.get("metadata") or {}).get("detectedThumbnails") or []):
+                if t.get("type") != "face":
+                    continue
+                g = t.get("group") or {}
+                gid = g.get("id")
+                if not gid or gid in listed:
+                    continue
+                entry = seen.setdefault(gid, {"count": 0, "last_ts": 0,
+                                              "first_ts": ts or 0, "matchedName": g.get("matchedName")})
+                entry["count"] += 1
+                if (ts or 0) > entry["last_ts"]:
+                    entry["last_ts"] = ts or 0
+                if (ts or 0) < entry["first_ts"] or entry["first_ts"] == 0:
+                    entry["first_ts"] = ts or 0
+
+        synthetic = []
+        for gid, info in seen.items():
+            synthetic.append({
+                "id": gid,
+                "name": None,
+                "matchedName": info.get("matchedName") or "",
+                "type": "face",
+                "isDegraded": gid.startswith("face_degraded_"),
+                "detectionsCount": info["count"],
+                "firstDetectedAt": info["first_ts"] or None,
+                "lastDetectedAt": info["last_ts"] or None,
+                "metadata": {},
+                "_phantom": True,
+            })
+
+        with lock:
+            cache["at"] = time.time()
+            cache["data"] = synthetic
+        return synthetic
+
     def find_enhanced_id_for_group(self, group_id: str) -> str | None:
         """Return the first enhancedImageId in the group's detections, or None.
 

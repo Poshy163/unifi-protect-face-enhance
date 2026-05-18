@@ -621,13 +621,23 @@ const state = {
   unenrolledLimit: 60,
   unenrolledTotal: 0,
   // Detail view
-  detailIdentity: null,      // identity object
+  detailIdentity: null,
   detailDetections: [],
   detailSelected: new Set(),
   detailLastIdx: null,
   detailPage: 1,
   detailHasMore: true,
+  // Cache-buster for avatar URLs. Bumped after any mutation so the browser
+  // refetches /api/groups/{id}/avatar (which has aggressive Cache-Control).
+  avatarVersion: Date.now(),
 };
+
+function avatarUrl(groupId) {
+  return `/api/groups/${groupId}/avatar?v=${state.avatarVersion}`;
+}
+function bumpAvatarVersion() {
+  state.avatarVersion = Date.now();
+}
 
 function toast(msg, kind = "") {
   const t = $("toast");
@@ -695,7 +705,7 @@ function renderIdentities() {
     row.dataset.id = g.id;
     row.innerHTML = `
       <div class="key">${hotkey || "•"}</div>
-      <img loading="lazy" src="/api/groups/${g.id}/avatar" onerror="this.style.opacity=0.2">
+      <img loading="lazy" src="${avatarUrl(g.id)}" onerror="this.style.opacity=0.2">
       <div class="info">
         <div class="name">${escapeHtml(g.name || "(unnamed)")}</div>
         <div class="count">${g.detectionsCount} detection${g.detectionsCount === 1 ? "" : "s"}</div>
@@ -725,6 +735,7 @@ function renderIdentities() {
         await api("POST", "/api/merge", { fromGroupIds: ids, toGroupId: g.id });
         toast(`Merged ${ids.length} → ${g.name}`, "ok");
         state.selected.clear();
+        bumpAvatarVersion();
         await refreshAll();
       } catch (err) { toast(`Merge failed: ${err.message}`, "error"); }
     });
@@ -757,7 +768,7 @@ function renderCards() {
       card.dataset.idx = idx;
       card.draggable = true;
       card.innerHTML = `
-        <img loading="lazy" draggable="false" src="/api/groups/${g.id}/avatar" onerror="this.style.opacity=0.2">
+        <img loading="lazy" draggable="false" src="${avatarUrl(g.id)}" onerror="this.style.opacity=0.2">
         <div class="meta"><div class="row">
           <span class="gid">${shortId(g.id)}</span>
           <span>${g.detectionsCount}</span>
@@ -812,6 +823,7 @@ async function mergeIntoIdentity(identityId) {
     state.selected.clear();
     state.armedIdentityId = null;
     $("armed-info").textContent = "";
+    bumpAvatarVersion();
     await refreshAll();
   } catch (e) {
     toast(`Merge failed: ${e.message}`, "error");
@@ -904,6 +916,7 @@ async function confirmRename() {
       }
     }
     $("modal-rename").classList.remove("show");
+    bumpAvatarVersion();
     await refreshAll();
   } catch (e) {
     toast(`Failed: ${e.message}`, "error");
@@ -935,6 +948,7 @@ async function confirmDelete() {
       toast(`Deleted ${res.deleted} face group${res.deleted === 1 ? "" : "s"}`, "ok");
     }
     state.selected.clear();
+    bumpAvatarVersion();
     await refreshAll();
   } catch (e) {
     toast(`Delete failed: ${e.message}`, "error");
@@ -973,7 +987,7 @@ async function openIdentity(g) {
   $("view-triage").style.display = "none";
   $("view-detail").style.display = "flex";
 
-  $("detail-avatar").src = `/api/groups/${g.id}/avatar`;
+  $("detail-avatar").src = avatarUrl(g.id);
   $("detail-title").textContent = g.name || "(unnamed)";
 
   renderIdentities();
@@ -1086,9 +1100,9 @@ async function confirmReassign() {
   try {
     await api("POST", "/api/detections/reassign", { detectionIds, groupId: target });
     toast(`Moved ${detectionIds.length} detection(s)`, "ok");
-    // Drop them from the current view + refresh sidebar counts
     state.detailDetections = state.detailDetections.filter(d => !detectionIds.includes(d.id));
     state.detailSelected.clear();
+    bumpAvatarVersion();
     renderDetail();
     await refreshIdentities();
   } catch (e) {
@@ -1105,6 +1119,7 @@ async function unassignSelected() {
     toast(`Unassigned ${detectionIds.length} detection(s)`, "ok");
     state.detailDetections = state.detailDetections.filter(d => !detectionIds.includes(d.id));
     state.detailSelected.clear();
+    bumpAvatarVersion();
     renderDetail();
     await refreshIdentities();
   } catch (e) {
@@ -1116,7 +1131,7 @@ async function openBestAvatarPicker() {
   if (!state.detailIdentity) return;
   const g = state.detailIdentity;
   $("best-avatar-name").textContent = g.name || "(unnamed)";
-  $("best-avatar-current").src = `/api/groups/${g.id}/avatar?enhanced=false`;
+  $("best-avatar-current").src = `/api/groups/${g.id}/avatar?enhanced=false&v=${state.avatarVersion}`;
   $("best-avatar-candidates").innerHTML = "<div style='color:var(--fg-dim);padding:8px'>Loading candidates…</div>";
   $("modal-best-avatar").classList.add("show");
 
@@ -1161,11 +1176,10 @@ async function applyBestAvatar(enhancedImageId) {
     toast(`Reference photo updated`, "ok");
     $("modal-best-avatar").classList.remove("show");
     // Bust the cached avatar so the new one shows immediately
-    $("detail-avatar").src = `/api/groups/${g.id}/avatar?t=${Date.now()}`;
+    bumpAvatarVersion();
+    $("detail-avatar").src = avatarUrl(g.id);
     document.querySelectorAll(`img[src*="/api/groups/${g.id}/avatar"]`).forEach(img => {
-      const u = new URL(img.src, location.origin);
-      u.searchParams.set("t", Date.now());
-      img.src = u.toString();
+      img.src = avatarUrl(g.id);
     });
     await refreshIdentities();
   } catch (e) {
@@ -1180,6 +1194,7 @@ async function deleteCurrentIdentity() {
   try {
     await api("POST", "/api/groups/delete", { ids: [g.id] });
     toast(`Deleted identity ${g.name}`, "ok");
+    bumpAvatarVersion();
     backToTriage();
     await refreshAll();
   } catch (e) {
@@ -1325,7 +1340,7 @@ async function stepAi() {
 
   const groupId = ai.queue.shift();
   ai.current = groupId;
-  $("ai-query-img").src = `/api/groups/${groupId}/avatar`;
+  $("ai-query-img").src = avatarUrl(groupId);
   $("ai-suggest-img").src = "";
   $("ai-suggest-name").textContent = "…thinking";
   $("ai-suggest-name").style.color = "";
@@ -1365,7 +1380,7 @@ async function stepAi() {
     $("ai-yes").disabled = true;
   } else {
     $("ai-status").textContent = "Press Y to merge, N to skip";
-    $("ai-suggest-img").src = `/api/groups/${suggest.identityId}/avatar`;
+    $("ai-suggest-img").src = avatarUrl(suggest.identityId);
     $("ai-suggest-name").textContent = suggest.name;
     $("ai-suggest-name").style.color = suggest.confidence >= 0.85 ? "var(--ok)" : "var(--warn)";
     $("ai-suggest-conf").textContent = `confidence ${Math.round(suggest.confidence*100)}%`;
@@ -1382,8 +1397,8 @@ async function aiYes() {
   try {
     await api("POST", "/api/merge", { fromGroupIds: [ai.current], toGroupId: ai.currentSuggest.identityId });
     toast(`Merged → ${ai.currentSuggest.name}`, "ok");
-    // Remove this card from the displayed list optimistically
     state.cards = state.cards.filter(c => c.id !== ai.current);
+    bumpAvatarVersion();
     renderCards();
     await refreshIdentities();
   } catch (e) {
