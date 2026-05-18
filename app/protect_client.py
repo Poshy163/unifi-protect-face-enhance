@@ -22,7 +22,7 @@ BASE_PROTECT = "/proxy/protect/api"
 
 class ProtectClient:
     def __init__(self, host: str, username: str, password: str,
-                 groups_cache_ttl: float = 15.0, pool_size: int = 50):
+                 groups_cache_ttl: float = 5.0, pool_size: int = 50):
         self.host = host
         self.username = username
         self.password = password
@@ -188,6 +188,32 @@ class ProtectClient:
         r = self.delete(f"{BASE_PROTECT}/recognition/face/groups/{group_id}")
         if r.status_code >= 400 and r.status_code != 404:
             raise RuntimeError(f"delete failed HTTP {r.status_code}: {r.text[:300]}")
+
+    def upload_group_image(self, group_id: str, image_bytes: bytes,
+                           filename: str = "best.jpg",
+                           mime_type: str = "image/jpeg") -> dict:
+        """POST /recognition/face/groups/{id}/image (multipart) — sets the
+        cluster's reference image. Used to replace a low-quality avatar with
+        a clearer enhanced face crop."""
+        files = {"file": (filename, image_bytes, mime_type)}
+        # buildUrl auto-pulls cookies + csrf, but requests + Session does the
+        # multipart encoding for us. We call .post directly without `json=` so
+        # the multipart Content-Type is set correctly.
+        url = f"https://{self.host}{BASE_PROTECT}/recognition/face/groups/{group_id}/image"
+        session = self._ensure_session()
+        r = session.post(url, files=files, verify=False, timeout=30)
+        if r.status_code == 401:
+            with self._lock:
+                self._login_locked()
+                session = self._session
+            assert session is not None
+            r = session.post(url, files=files, verify=False, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"avatar upload failed HTTP {r.status_code}: {r.text[:300]}")
+        try:
+            return r.json()
+        except Exception:
+            return {"ok": True}
 
     def rename_group(self, group_id: str, name: str) -> dict:
         """PATCH /recognition/face/groups/{id}  with {name}.

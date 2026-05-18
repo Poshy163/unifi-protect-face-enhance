@@ -214,8 +214,16 @@
     position: relative;
     display: flex;
     flex-direction: column;
-    /* Fits inside the 180px grid row with a 2px border on each side. */
     height: 100%;
+    /* Stop the browser from treating the inner img as the drag source —
+       we want the whole card to drag as a unit. */
+    -webkit-user-drag: element;
+    user-select: none;
+  }
+  .card img {
+    -webkit-user-drag: none;
+    user-drag: none;
+    pointer-events: none;  /* clicks/drags fall through to the card */
   }
   .card:hover { border-color: var(--border); }
   .card.selected { border-color: var(--selected); }
@@ -447,6 +455,7 @@
           <div class="grow"></div>
           <span class="info"><span class="selected-count" id="detail-selected-count">0</span> selected</span>
           <button id="btn-detail-rename">Rename</button>
+          <button id="btn-detail-best-avatar" title="Pick the clearest face crop from this person's detections and set it as their reference photo">🎯 Best avatar</button>
           <button id="btn-detail-reassign" disabled>Move…</button>
           <button id="btn-detail-unassign" class="danger" disabled>Unassign</button>
           <button id="btn-detail-delete-id" class="danger ghost">Delete identity</button>
@@ -510,6 +519,27 @@
       <div class="actions">
         <button id="reassign-cancel">Cancel</button>
         <button id="reassign-confirm" class="primary">Move</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pick best avatar modal -->
+  <div class="modal-backdrop" id="modal-best-avatar">
+    <div class="modal" style="min-width:640px;max-width:880px">
+      <h3>Pick a new reference photo</h3>
+      <p>Click a candidate to set it as <span id="best-avatar-name">…</span>'s reference image. Protect uses this for face matching, so a clear, frontal face works best.</p>
+      <div style="display:flex;gap:16px;margin:12px 0">
+        <div style="text-align:center">
+          <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">Current</div>
+          <img id="best-avatar-current" style="width:120px;height:120px;object-fit:cover;border-radius:8px;background:var(--bg-3)">
+        </div>
+        <div style="flex:1">
+          <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">Candidates (best first)</div>
+          <div id="best-avatar-candidates" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;max-height:340px;overflow-y:auto"></div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="best-avatar-cancel">Cancel</button>
       </div>
     </div>
   </div>
@@ -727,7 +757,7 @@ function renderCards() {
       card.dataset.idx = idx;
       card.draggable = true;
       card.innerHTML = `
-        <img loading="lazy" src="/api/groups/${g.id}/avatar" onerror="this.style.opacity=0.2">
+        <img loading="lazy" draggable="false" src="/api/groups/${g.id}/avatar" onerror="this.style.opacity=0.2">
         <div class="meta"><div class="row">
           <span class="gid">${shortId(g.id)}</span>
           <span>${g.detectionsCount}</span>
@@ -978,8 +1008,11 @@ function renderDetail() {
       const enhanced = d.enhancedImageId || (d.metadata && d.metadata.faceEnhanceState === "done");
       const confidence = d.matchedGroupConfidence ?? "?";
       const ts = formatTs(d.detectedAt);
+      const thumbUrl = d.enhancedImageId
+        ? `/api/thumbnails/${d.enhancedImageId}?enhanced=true`
+        : `/api/thumbnails/${d.thumbnailId}`;
       card.innerHTML = `
-        <img loading="lazy" src="/api/thumbnails/${d.thumbnailId}" onerror="this.style.opacity=0.2">
+        <img loading="lazy" draggable="false" src="${thumbUrl}" onerror="this.style.opacity=0.2">
         <div class="meta">
           <div class="row"><span>${escapeHtml(ts)}</span><span>${confidence}%</span></div>
           <div class="row">
@@ -1079,6 +1112,67 @@ async function unassignSelected() {
   }
 }
 
+async function openBestAvatarPicker() {
+  if (!state.detailIdentity) return;
+  const g = state.detailIdentity;
+  $("best-avatar-name").textContent = g.name || "(unnamed)";
+  $("best-avatar-current").src = `/api/groups/${g.id}/avatar?enhanced=false`;
+  $("best-avatar-candidates").innerHTML = "<div style='color:var(--fg-dim);padding:8px'>Loading candidates…</div>";
+  $("modal-best-avatar").classList.add("show");
+
+  let res;
+  try {
+    res = await api("GET", `/api/identities/${g.id}/best-avatar-candidates`);
+  } catch (e) {
+    $("best-avatar-candidates").innerHTML = `<div style='color:var(--danger)'>Failed: ${e.message}</div>`;
+    return;
+  }
+
+  const candidates = res.candidates || [];
+  const withEnhanced = candidates.filter(c => c.enhancedImageId);
+  if (withEnhanced.length === 0) {
+    $("best-avatar-candidates").innerHTML =
+      `<div style='color:var(--fg-dim);padding:8px'>No enhanced detections yet. Run the enhancer first.</div>`;
+    return;
+  }
+
+  const wrap = $("best-avatar-candidates");
+  wrap.innerHTML = "";
+  withEnhanced.forEach((c, i) => {
+    const tile = document.createElement("div");
+    tile.style.cssText = "cursor:pointer;text-align:center;background:var(--bg-3);border-radius:6px;padding:6px;border:2px solid transparent";
+    tile.innerHTML = `
+      <img draggable="false" src="/api/thumbnails/${c.enhancedImageId}?enhanced=true"
+           style="width:96px;height:96px;object-fit:cover;border-radius:4px;background:var(--bg-3);display:block;margin:0 auto 4px">
+      <div style="font-size:10px;color:var(--fg-dim)">${c.matchedGroupConfidence ?? "?"}%${i === 0 ? " · top" : ""}</div>
+    `;
+    tile.addEventListener("mouseenter", () => tile.style.borderColor = "var(--accent)");
+    tile.addEventListener("mouseleave", () => tile.style.borderColor = "transparent");
+    tile.addEventListener("click", () => applyBestAvatar(c.enhancedImageId));
+    wrap.appendChild(tile);
+  });
+}
+
+async function applyBestAvatar(enhancedImageId) {
+  if (!state.detailIdentity) return;
+  const g = state.detailIdentity;
+  try {
+    await api("POST", `/api/identities/${g.id}/best-avatar`, { enhancedImageId });
+    toast(`Reference photo updated`, "ok");
+    $("modal-best-avatar").classList.remove("show");
+    // Bust the cached avatar so the new one shows immediately
+    $("detail-avatar").src = `/api/groups/${g.id}/avatar?t=${Date.now()}`;
+    document.querySelectorAll(`img[src*="/api/groups/${g.id}/avatar"]`).forEach(img => {
+      const u = new URL(img.src, location.origin);
+      u.searchParams.set("t", Date.now());
+      img.src = u.toString();
+    });
+    await refreshIdentities();
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  }
+}
+
 async function deleteCurrentIdentity() {
   if (!state.detailIdentity) return;
   const g = state.detailIdentity;
@@ -1169,10 +1263,16 @@ function renderEnhancerModal(s) {
 // ============================================================
 // AI SUGGEST MODE — walk through unnamed cards, ask Gemini, confirm Y/N
 // ============================================================
-const ai = { running: false, queue: [], current: null, currentSuggest: null };
+const ai = {
+  running: false,
+  queue: [],
+  current: null,
+  currentSuggest: null,
+  // Pre-fetched suggestions for upcoming queued items, keyed by groupId.
+  prefetched: new Map(),
+};
 
 async function startAiMode() {
-  // Check Gemini is reachable
   let st;
   try { st = await api("GET", "/api/ai/status"); }
   catch (e) { toast(`AI status check failed: ${e.message}`, "error"); return; }
@@ -1185,10 +1285,10 @@ async function startAiMode() {
     return;
   }
   ai.running = true;
-  // Queue is a copy of currently visible unnamed cards (in display order)
   ai.queue = state.cards.map(c => c.id);
   ai.current = null;
   ai.currentSuggest = null;
+  ai.prefetched.clear();
   $("modal-ai").classList.add("show");
   await stepAi();
 }
@@ -1198,8 +1298,22 @@ function endAiMode(msg) {
   ai.queue = [];
   ai.current = null;
   ai.currentSuggest = null;
+  ai.prefetched.clear();
   $("modal-ai").classList.remove("show");
   if (msg) toast(msg, "ok");
+}
+
+function prefetchNextSuggestion() {
+  // Look one step ahead in the queue and fire the suggest call without
+  // awaiting. By the time the user presses Y/N, the next response is usually
+  // ready and stepAi() just reads from the cache.
+  const next = ai.queue[0];
+  if (!next || ai.prefetched.has(next)) return;
+  // Mark as in-flight with a Promise placeholder
+  const p = api("GET", `/api/ai/suggest?groupId=${encodeURIComponent(next)}`)
+    .then(s => { ai.prefetched.set(next, { ok: true, value: s }); return s; })
+    .catch(err => { ai.prefetched.set(next, { ok: false, error: err }); throw err; });
+  ai.prefetched.set(next, { pending: p });
 }
 
 async function stepAi() {
@@ -1214,19 +1328,31 @@ async function stepAi() {
   $("ai-query-img").src = `/api/groups/${groupId}/avatar`;
   $("ai-suggest-img").src = "";
   $("ai-suggest-name").textContent = "…thinking";
+  $("ai-suggest-name").style.color = "";
   $("ai-suggest-conf").textContent = "";
   $("ai-reason").textContent = "";
   $("ai-status").textContent = "Asking Gemini…";
   $("ai-yes").disabled = true;
 
+  // Use a pre-fetched result if we already kicked one off for this id.
   let suggest;
+  const cached = ai.prefetched.get(groupId);
   try {
-    suggest = await api("GET", `/api/ai/suggest?groupId=${encodeURIComponent(groupId)}`);
+    if (cached) {
+      if (cached.pending) suggest = await cached.pending;
+      else if (cached.ok) suggest = cached.value;
+      else throw cached.error;
+    } else {
+      suggest = await api("GET", `/api/ai/suggest?groupId=${encodeURIComponent(groupId)}`);
+    }
   } catch (e) {
     $("ai-status").textContent = `Failed: ${e.message}`;
     $("ai-suggest-name").textContent = "—";
-    return; // user can still press N to skip
+    // Kick off the next one so we recover quickly
+    prefetchNextSuggestion();
+    return;
   }
+  ai.prefetched.delete(groupId);
   ai.currentSuggest = suggest;
 
   if (!suggest.identityId) {
@@ -1241,11 +1367,14 @@ async function stepAi() {
     $("ai-status").textContent = "Press Y to merge, N to skip";
     $("ai-suggest-img").src = `/api/groups/${suggest.identityId}/avatar`;
     $("ai-suggest-name").textContent = suggest.name;
-    $("ai-suggest-name").style.color = suggest.confidence >= 0.75 ? "var(--ok)" : "var(--warn)";
+    $("ai-suggest-name").style.color = suggest.confidence >= 0.85 ? "var(--ok)" : "var(--warn)";
     $("ai-suggest-conf").textContent = `confidence ${Math.round(suggest.confidence*100)}%`;
     $("ai-reason").textContent = suggest.reason || "";
     $("ai-yes").disabled = false;
   }
+
+  // Start fetching the next suggestion in the background
+  prefetchNextSuggestion();
 }
 
 async function aiYes() {
@@ -1365,9 +1494,11 @@ $("delete-confirm").addEventListener("click", confirmDelete);
 
 $("btn-back").addEventListener("click", backToTriage);
 $("btn-detail-rename").addEventListener("click", () => state.detailIdentity && promptRenameIdentity(state.detailIdentity));
+$("btn-detail-best-avatar").addEventListener("click", openBestAvatarPicker);
 $("btn-detail-reassign").addEventListener("click", promptReassign);
 $("btn-detail-unassign").addEventListener("click", unassignSelected);
 $("btn-detail-delete-id").addEventListener("click", deleteCurrentIdentity);
+$("best-avatar-cancel").addEventListener("click", () => $("modal-best-avatar").classList.remove("show"));
 $("btn-detail-load-more").addEventListener("click", async () => {
   state.detailPage += 1;
   await loadDetectionsPage();
@@ -1398,6 +1529,10 @@ document.addEventListener("keydown", (e) => {
   if ($("modal-rename").classList.contains("show")) return;
   if ($("modal-retro").classList.contains("show")) return;
   if ($("modal-reassign").classList.contains("show")) return;
+  if ($("modal-best-avatar").classList.contains("show")) {
+    if (e.key === "Escape") $("modal-best-avatar").classList.remove("show");
+    return;
+  }
   if ($("modal-enhancer").classList.contains("show")) {
     if (e.key === "Escape") $("modal-enhancer").classList.remove("show");
     return;

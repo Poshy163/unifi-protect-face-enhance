@@ -13,6 +13,10 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 from .enhancer_status import STATUS
 from .gemini_client import build_from_env as build_gemini, is_available as gemini_available
 from .protect_client import BASE_PROTECT, ProtectClient
@@ -72,9 +76,42 @@ class ReassignBody(BaseModel):
     groupId: str | None = None
 
 
+class BestAvatarApplyBody(BaseModel):
+    """Apply a candidate enhanced image as the identity's reference avatar."""
+    enhancedImageId: str = Field(min_length=1)
+
+
 def create_app(client: ProtectClient) -> FastAPI:
     app = FastAPI(title="Face Triage", docs_url="/api/docs", redoc_url=None)
     gemini = build_gemini()  # None if no GEMINI_API_KEY or SDK missing
+
+    # In-memory cache for reference identity images used by Gemini suggest.
+    # Saves 14+ HTTP round-trips per suggestion after the first call.
+    _ref_image_cache: dict[str, tuple[float, bytes]] = {}
+    _ref_image_lock = threading.Lock()
+    _REF_IMAGE_TTL = 30 * 60  # 30 minutes
+
+    def get_reference_image(group_id: str) -> bytes | None:
+        """Return the best face image for an identity (enhanced if possible)."""
+        now = time.time()
+        with _ref_image_lock:
+            cached = _ref_image_cache.get(group_id)
+            if cached and now - cached[0] < _REF_IMAGE_TTL:
+                return cached[1]
+        eid = client.find_enhanced_id_for_group(group_id)
+        if eid:
+            r = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{eid}")
+        else:
+            r = client.get(f"{BASE_PROTECT}/recognition/face/groups/{group_id}/image")
+        if r.status_code != 200:
+            return None
+        with _ref_image_lock:
+            _ref_image_cache[group_id] = (time.time(), r.content)
+        return r.content
+
+    def invalidate_ref_image(group_id: str) -> None:
+        with _ref_image_lock:
+            _ref_image_cache.pop(group_id, None)
 
     @app.get("/")
     def root() -> FileResponse:
@@ -159,6 +196,8 @@ def create_app(client: ProtectClient) -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         client.invalidate_groups_cache()
+        for gid in body.fromGroupIds + [body.toGroupId]:
+            invalidate_ref_image(gid)
         return {"ok": True, "merged": len(body.fromGroupIds), "result": result}
 
     @app.patch("/api/identities/{group_id}")
@@ -170,6 +209,7 @@ def create_app(client: ProtectClient) -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         client.invalidate_groups_cache()
+        invalidate_ref_image(group_id)
         return group_summary(result)
 
     @app.post("/api/groups/delete")
@@ -180,6 +220,7 @@ def create_app(client: ProtectClient) -> FastAPI:
             try:
                 client.delete_group(gid)
                 deleted += 1
+                invalidate_ref_image(gid)
             except Exception as e:
                 failed.append({"id": gid, "error": str(e)[:200]})
         client.invalidate_groups_cache()
@@ -270,6 +311,70 @@ def create_app(client: ProtectClient) -> FastAPI:
             headers={"Cache-Control": "private, max-age=3600, immutable"},
         )
 
+    @app.get("/api/identities/{group_id}/best-avatar-candidates")
+    def best_avatar_candidates(group_id: str, max_candidates: int = Query(8, ge=1, le=20)) -> dict:
+        """Rank an identity's detections and return the top candidates for use
+        as the cluster reference image. Sorts by matchedGroupConfidence desc
+        with enhanced images preferred. The frontend shows these as a picker."""
+        # Walk a few pages — most identities have plenty of detections; we want
+        # quality not quantity.
+        all_dets: list[dict] = []
+        for page in range(1, 4):
+            r = client.get(
+                f"{BASE_PROTECT}/recognition/face/groups/{group_id}/detections",
+                params={"page": page, "pageSize": 100},
+            )
+            if r.status_code != 200:
+                break
+            batch = r.json().get("detections", [])
+            if not batch:
+                break
+            all_dets.extend(batch)
+            if len(batch) < 100:
+                break
+
+        if not all_dets:
+            raise HTTPException(404, "no detections for this identity")
+
+        # Rank: (has_enhanced, matchedGroupConfidence, recency)
+        def score(d: dict) -> tuple:
+            return (
+                1 if d.get("enhancedImageId") else 0,
+                d.get("matchedGroupConfidence") or 0,
+                d.get("detectedAt") or 0,
+            )
+
+        all_dets.sort(key=score, reverse=True)
+        top = all_dets[:max_candidates]
+
+        return {
+            "candidates": [
+                {
+                    "detectionId": d["id"],
+                    "enhancedImageId": d.get("enhancedImageId"),
+                    "thumbnailId": d.get("thumbnailId"),
+                    "matchedGroupConfidence": d.get("matchedGroupConfidence"),
+                    "detectedAt": d.get("detectedAt"),
+                }
+                for d in top
+            ],
+            "totalChecked": len(all_dets),
+        }
+
+    @app.post("/api/identities/{group_id}/best-avatar")
+    def apply_best_avatar(group_id: str, body: BestAvatarApplyBody) -> dict:
+        """Replace the identity's reference image with the chosen enhanced crop."""
+        r = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{body.enhancedImageId}")
+        if r.status_code != 200:
+            raise HTTPException(404, "could not fetch chosen image")
+        try:
+            client.upload_group_image(group_id, r.content)
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        client.invalidate_groups_cache()
+        invalidate_ref_image(group_id)
+        return {"ok": True, "enhancedImageId": body.enhancedImageId}
+
     @app.post("/api/detections/reassign")
     def reassign_detections(body: ReassignBody) -> dict:
         """Move detections to another identity, or pass groupId=null to
@@ -298,40 +403,34 @@ def create_app(client: ProtectClient) -> FastAPI:
 
     @app.get("/api/ai/suggest")
     def ai_suggest(groupId: str) -> dict:
-        """Ask Gemini which known identity (if any) matches an unnamed group.
-
-        Returns {identityId, name, confidence, reason}. Cached per (groupId, identity-set).
-        """
+        """Ask Gemini which known identity (if any) matches an unnamed group."""
         if gemini is None:
             raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY.")
 
-        # Fetch the query face — prefer the enhanced version for clarity.
-        eid = client.find_enhanced_id_for_group(groupId)
-        if eid:
-            r_img = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{eid}")
-        else:
-            r_img = client.get(f"{BASE_PROTECT}/recognition/face/groups/{groupId}/image")
-        if r_img.status_code != 200:
-            raise HTTPException(404, "could not fetch group image")
-        query_image = r_img.content
-
-        # Identity reference images (also enhanced when available).
         groups = client.list_face_groups()
         identities_raw = [g for g in groups if is_named_identity(g)]
-        identities: list[dict] = []
-        for g in identities_raw:
-            gid = g["id"]
-            iid = client.find_enhanced_id_for_group(gid)
-            if iid:
-                ir = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{iid}")
-            else:
-                ir = client.get(f"{BASE_PROTECT}/recognition/face/groups/{gid}/image")
-            if ir.status_code == 200:
-                identities.append({"id": gid, "name": g.get("name") or g.get("matchedName") or gid,
-                                   "image": ir.content})
-
-        if not identities:
+        if not identities_raw:
             raise HTTPException(400, "no known identities to compare against")
+
+        # Pull every image in parallel — this is the dominant latency.
+        def fetch_query():
+            return get_reference_image(groupId)
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            fut_q = ex.submit(fetch_query)
+            futs = {ex.submit(get_reference_image, g["id"]): g for g in identities_raw}
+            query_image = fut_q.result()
+            identities: list[dict] = []
+            for fut, g in futs.items():
+                img = fut.result()
+                if img:
+                    identities.append({
+                        "id": g["id"],
+                        "name": g.get("name") or g.get("matchedName") or g["id"],
+                        "image": img,
+                    })
+
+        if not query_image:
+            raise HTTPException(404, "could not fetch query face")
 
         try:
             result = gemini.suggest(query_image, identities, cache_key=groupId)

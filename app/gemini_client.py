@@ -25,7 +25,10 @@ except Exception:
     _GENAI_AVAILABLE = False
 
 
-_DEFAULT_MODEL = "gemini-2.5-flash-lite"
+# gemini-2.5-flash is meaningfully better than flash-lite at face matching
+# and costs ~$0.001 per query at the image volume we send. flash-lite is
+# available via GEMINI_MODEL override for cost-sensitive setups.
+_DEFAULT_MODEL = "gemini-2.5-flash"
 
 
 class GeminiClient:
@@ -56,22 +59,35 @@ class GeminiClient:
                     return hit
 
         parts: list[Any] = []
-        # Query face first.
-        parts.append("This is the QUERY face we want to identify:")
-        parts.append(genai_types.Part.from_bytes(data=query_image, mime_type="image/jpeg"))
         parts.append(
-            "Below are reference photos of known people. For each, the name "
-            "comes before the image."
+            "You are matching a query face to a set of known people. Work in "
+            "three steps:\n"
+            "1. Describe the QUERY face's apparent gender, approximate age, "
+            "skin tone, hair color and style, glasses or other distinguishing "
+            "features. Use the most visible features even if the image is "
+            "blurry.\n"
+            "2. Compare against each KNOWN person in turn and score how well "
+            "they match the query.\n"
+            "3. Pick the single best match — but ONLY if you're confident. "
+            "Return UNKNOWN if the query is too blurry/occluded/small to be "
+            "sure, OR if no known person matches well.\n"
         )
-        for i, ident in enumerate(identities, start=1):
-            parts.append(f"REFERENCE {i}: {ident['name']}")
+        parts.append("QUERY face to identify:")
+        parts.append(genai_types.Part.from_bytes(data=query_image, mime_type="image/jpeg"))
+        parts.append("KNOWN people (label, then image):")
+        for ident in identities:
+            parts.append(f"--- {ident['name']} ---")
             parts.append(genai_types.Part.from_bytes(data=ident["image"], mime_type="image/jpeg"))
 
         parts.append(
-            "Which reference person, if any, is the same person as the query face? "
-            "Consider face shape, features, age, gender. Return strict JSON only.\n"
-            'Schema: {"name": <reference name or "UNKNOWN">, "confidence": <0.0-1.0>, "reason": <short>}\n'
-            "If confidence is below 0.6, set name to UNKNOWN."
+            "Return STRICT JSON only — no markdown, no commentary.\n"
+            'Schema: {"name": "<one of the KNOWN names above, or UNKNOWN>", '
+            '"confidence": <0.0-1.0>, "reason": "<one short sentence>"}\n'
+            "Confidence rubric:\n"
+            "  >=0.85 = same person, no real doubt\n"
+            "  0.70-0.85 = probably same person\n"
+            "  <0.70 = unsure → return UNKNOWN instead\n"
+            "If the query is too low-quality to compare, return UNKNOWN with confidence 0.0."
         )
 
         response = self._client.models.generate_content(
