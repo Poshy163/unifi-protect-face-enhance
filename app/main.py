@@ -33,6 +33,7 @@ import requests
 import urllib3
 
 from .enhancer_status import STATUS
+from .version import __build_date__, __version__
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -545,7 +546,7 @@ def main():
     webapp_port = env_int("WEBAPP_PORT", 8080)
     webapp_host = env_str("WEBAPP_HOST", "0.0.0.0") or "0.0.0.0"
 
-    print(f"[*] UniFi Protect Face Enhance starting")
+    print(f"[*] UniFi Protect Face Enhance v{__version__} ({__build_date__})")
     print(f"    host={host} user={username}")
     print(f"    enhancer={enhancer_enabled} (poll_interval={poll_interval}s, run_once={run_once}, dry_run={dry_run})")
     print(f"    webapp={webapp_enabled} (port={webapp_port})")

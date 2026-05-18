@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .enhancer_status import STATUS
 from .gemini_client import build_from_env as build_gemini, is_available as gemini_available
 from .protect_client import BASE_PROTECT, ProtectClient
+from .version import __build_date__, __version__
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -123,6 +124,10 @@ def create_app(client: ProtectClient) -> FastAPI:
     @app.get("/api/health")
     def health() -> dict:
         return {"status": "ok"}
+
+    @app.get("/api/version")
+    def version() -> dict:
+        return {"version": __version__, "buildDate": __build_date__}
 
     @app.get("/api/identities")
     def list_identities() -> list[dict]:
@@ -394,14 +399,12 @@ def create_app(client: ProtectClient) -> FastAPI:
         invalidate_ref_image(group_id)
         return {"ok": True, "enhancedImageId": body.enhancedImageId}
 
-    @app.post("/api/identities/{group_id}/best-avatar-ai")
-    def apply_best_avatar_ai(group_id: str, max_candidates: int = Query(12, ge=2, le=20)) -> dict:
-        """Let Gemini pick the best reference photo from the identity's top
-        enhanced candidates, then upload it as the cluster avatar."""
+    def _gemini_pick_best(group_id: str, max_candidates: int) -> dict:
+        """Internal helper. Returns {enhancedImageId, detectionId, reason,
+        candidatesConsidered}. Does NOT upload — caller decides."""
         if gemini is None:
             raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY.")
 
-        # Reuse the candidate-ranking logic
         all_dets: list[dict] = []
         for page in range(1, 4):
             r = client.get(
@@ -425,14 +428,12 @@ def create_app(client: ProtectClient) -> FastAPI:
         enhanced.sort(key=lambda d: d.get("matchedGroupConfidence") or 0, reverse=True)
         top = enhanced[:max_candidates]
 
-        # Fetch all candidate images in parallel
         def fetch_one(d: dict) -> bytes | None:
             r = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{d['enhancedImageId']}")
             return r.content if r.status_code == 200 else None
 
         with ThreadPoolExecutor(max_workers=16) as ex:
             results = list(ex.map(fetch_one, top))
-
         pairs = [(d, img) for d, img in zip(top, results) if img]
         if not pairs:
             raise HTTPException(500, "could not fetch any candidate images")
@@ -442,20 +443,34 @@ def create_app(client: ProtectClient) -> FastAPI:
         except Exception as e:
             raise HTTPException(500, f"Gemini call failed: {type(e).__name__}: {e}")
 
-        chosen_det, chosen_img = pairs[choice["index"]]
-        try:
-            client.upload_group_image(group_id, chosen_img)
-        except RuntimeError as e:
-            raise HTTPException(400, str(e))
-        client.invalidate_groups_cache()
-        invalidate_ref_image(group_id)
+        chosen_det, _ = pairs[choice["index"]]
         return {
-            "ok": True,
             "enhancedImageId": chosen_det["enhancedImageId"],
             "detectionId": chosen_det["id"],
             "candidatesConsidered": len(pairs),
             "reason": choice["reason"],
         }
+
+    @app.get("/api/identities/{group_id}/best-avatar-ai-suggest")
+    def suggest_best_avatar_ai(group_id: str, max_candidates: int = Query(12, ge=2, le=20)) -> dict:
+        """Same picker as the apply endpoint but returns the choice WITHOUT
+        uploading. Lets the UI preview before the user commits."""
+        return _gemini_pick_best(group_id, max_candidates)
+
+    @app.post("/api/identities/{group_id}/best-avatar-ai")
+    def apply_best_avatar_ai(group_id: str, max_candidates: int = Query(12, ge=2, le=20)) -> dict:
+        """Pick + upload in one call. Kept for back-compat / power use."""
+        choice = _gemini_pick_best(group_id, max_candidates)
+        r = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{choice['enhancedImageId']}")
+        if r.status_code != 200:
+            raise HTTPException(404, "could not fetch chosen image")
+        try:
+            client.upload_group_image(group_id, r.content)
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        client.invalidate_groups_cache()
+        invalidate_ref_image(group_id)
+        return {"ok": True, **choice}
 
     @app.post("/api/detections/reassign")
     def reassign_detections(body: ReassignBody) -> dict:

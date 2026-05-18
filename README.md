@@ -223,6 +223,19 @@ GET  /api/ai/status                         # {available, sdk_installed}
 GET  /api/ai/suggest?groupId=...            # {identityId, name, confidence, reason}
 ```
 
+## Versioning
+
+The app exposes its version via `GET /api/version` and shows it next to
+the title in the webapp header. The source of truth is
+[app/version.py](app/version.py); every behavioural change bumps it. See
+[CHANGELOG.md](CHANGELOG.md) for the per-version log.
+
+Loose semver:
+
+- **Patch** (`0.1.X`) — fixes, small UI tweaks, internal refactors.
+- **Minor** (`0.X.0`) — new features.
+- **Major** (`X.0.0`) — breaking config / API changes.
+
 ## License
 
 MIT
