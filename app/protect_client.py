@@ -138,8 +138,18 @@ class ProtectClient:
             self._groups_cache_data = None
             self._groups_cache_at = 0.0
 
+    def invalidate_phantom_cache(self) -> None:
+        """Drop the phantom-group cache so the next harvest re-walks events."""
+        lock = getattr(self, "_phantom_lock", None)
+        cache = getattr(self, "_phantom_cache", None)
+        if lock is None or cache is None:
+            return
+        with lock:
+            cache["at"] = 0.0
+            cache["data"] = []
+
     def harvest_phantom_groups(self, window_hours: int = 168,
-                               cache_ttl: float = 10.0) -> list[dict]:
+                               cache_ttl: float = 4.0) -> list[dict]:
         """Walk recent smartDetectZone events and return synthetic records
         for every face group referenced that isn't in /recognition/face/groups.
 

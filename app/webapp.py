@@ -220,6 +220,7 @@ def create_app(client: ProtectClient) -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         client.invalidate_groups_cache()
+        client.invalidate_phantom_cache()
         for gid in body.fromGroupIds + [body.toGroupId]:
             invalidate_ref_image(gid)
         return {"ok": True, "merged": len(body.fromGroupIds), "result": result}
@@ -233,6 +234,7 @@ def create_app(client: ProtectClient) -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         client.invalidate_groups_cache()
+        client.invalidate_phantom_cache()
         invalidate_ref_image(group_id)
         return group_summary(result)
 
@@ -248,6 +250,7 @@ def create_app(client: ProtectClient) -> FastAPI:
             except Exception as e:
                 failed.append({"id": gid, "error": str(e)[:200]})
         client.invalidate_groups_cache()
+        client.invalidate_phantom_cache()
         return {"ok": True, "deleted": deleted, "failed": failed}
 
     @app.post("/api/retroactive/start")
@@ -484,6 +487,7 @@ def create_app(client: ProtectClient) -> FastAPI:
         if r.status_code >= 400:
             raise HTTPException(400, f"reassign failed HTTP {r.status_code}: {r.text[:300]}")
         client.invalidate_groups_cache()
+        client.invalidate_phantom_cache()
         return {
             "ok": True,
             "moved": len(body.detectionIds),

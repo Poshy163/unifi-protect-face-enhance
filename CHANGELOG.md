@@ -2,6 +2,19 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.1.3 — 2026-05-19
+
+- Fix: delete on phantom face groups appeared to do nothing in the UI
+  because the phantom-harvest cache (was 10s TTL) wasn't being invalidated
+  on mutations. The actual `DELETE /recognition/face/groups/{id}` API call
+  was succeeding silently. Now `merge`, `rename`, `delete`, `reassign` all
+  invalidate the phantom cache.
+- Phantom cache TTL dropped 10s → 4s for snappier baseline freshness.
+- Fix: new face events from Protect didn't appear in triage without a
+  manual refresh. Added a 30s auto-refresh of the unenrolled grid that
+  runs only while the triage view is focused, no selection is active, no
+  modal is open, and AI suggest mode isn't running.
+
 ## 0.1.2 — 2026-05-19
 
 - Fix: "🤖 AI pick" badge on the best-avatar tile was getting clipped by
