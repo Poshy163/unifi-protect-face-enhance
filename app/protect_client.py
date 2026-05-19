@@ -174,10 +174,17 @@ class ProtectClient:
         end_ms = int(now * 1000)
         start_ms = end_ms - window_hours * 3600 * 1000
 
+        # CRITICAL: Protect's /events endpoint defaults to ASCending order.
+        # Without orderDirection=DESC, `limit=500` over a 7-day window grabs
+        # the OLDEST 500 events and misses everything recent — meaning new
+        # face clusters never appear in the triage UI. Verified against a
+        # live Protect 7.1.55 instance: without DESC, harvest returned 0
+        # phantoms because every event was 6+ days old.
         r = self.get(
             f"{BASE_PROTECT}/events",
             params={"start": start_ms, "end": end_ms,
-                    "type": "smartDetectZone", "limit": 500},
+                    "type": "smartDetectZone", "limit": 500,
+                    "orderDirection": "DESC"},
             timeout=60,
         )
         if r.status_code != 200:

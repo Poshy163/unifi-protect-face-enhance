@@ -2,6 +2,37 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.2.1 — 2026-05-19
+
+- **Fix (critical): new faces from Protect didn't appear in triage.** The
+  phantom-group harvest was hitting `/events` without an `orderDirection`
+  parameter — Protect defaults to ASC, so `limit=500` over the 7-day window
+  returned the OLDEST 500 events and skipped everything recent. Verified on a
+  live Protect 7.1.55 instance: 0 phantoms harvested without `DESC`, 18+ with
+  it. Added `orderDirection=DESC` to the events request.
+- **Fix: 🤖 Let AI pick** appeared to do nothing — it would say "AI picked
+  one" but no tile got the blue halo. Root cause: the candidate-grid endpoint
+  returns top 8 detections ranked by `(has_enhanced, confidence, recency)`,
+  but the AI suggest endpoint ranked top 12 by `confidence` only. AI was
+  picking ids that weren't in the displayed grid. The UI now sends the
+  displayed `enhancedImageId`s to the AI endpoint, which restricts its pick
+  to exactly those tiles.
+
+## 0.2.0 — 2026-05-19
+
+- UI redesigned with a UniFi-inspired palette:
+  - Navy base (`#0b1220`) with subtle radial gradient backdrop
+  - Vibrant cyan-blue accent (`#0094ff`) matching UniFi Protect
+  - Brighter status colors: emerald `#22d37c`, amber `#ffa726`, coral
+    `#ff4d5e`
+  - Title bar gets a glowing status dot + light gradient text
+  - Cards lift higher on hover with a blue glow; selection ring uses a
+    halo effect
+  - Primary buttons gain a UniFi-style gradient + outer glow
+  - Drag/drop "merge target" identity rows now glow blue, not green,
+    matching the accent
+- Pill, sidebar, and modal styling refined to match the new palette.
+
 ## 0.1.3 — 2026-05-19
 
 - Fix: delete on phantom face groups appeared to do nothing in the UI

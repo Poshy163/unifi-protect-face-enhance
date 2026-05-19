@@ -6,39 +6,47 @@
 <title>Face Triage</title>
 <style>
   :root {
-    /* Modern Linear/Vercel-inspired dark palette */
-    --bg: #0a0a0f;
-    --bg-2: #111118;
-    --bg-3: #18181f;
-    --bg-4: #22222d;
-    --bg-hover: #1c1c25;
-    --fg: #f1f1f5;
-    --fg-dim: #8a8a96;
-    --fg-faint: #5f5f6b;
-    --accent: #6366f1;          /* indigo */
-    --accent-2: #4f46e5;
-    --accent-soft: rgba(99, 102, 241, 0.12);
-    --selected: #6366f1;
-    --danger: #ef4444;
-    --danger-soft: rgba(239, 68, 68, 0.14);
-    --warn: #f59e0b;
-    --ok: #10b981;
-    --ok-soft: rgba(16, 185, 129, 0.14);
-    --border: #23232f;
-    --border-strong: #2f2f3d;
+    /* UniFi-inspired palette — navy base, vibrant cyan-blue accent, brighter
+       status colors than the previous indigo theme. */
+    --bg: #0b1220;
+    --bg-2: #121b2d;
+    --bg-3: #1a253c;
+    --bg-4: #243149;
+    --bg-hover: #182338;
+    --fg: #eef2f9;
+    --fg-dim: #93a3bf;
+    --fg-faint: #5f6f8c;
+    --accent: #0094ff;          /* UniFi vibrant blue */
+    --accent-2: #006fff;
+    --accent-3: #4db4ff;        /* hover tint */
+    --accent-soft: rgba(0, 148, 255, 0.14);
+    --accent-glow: rgba(0, 148, 255, 0.36);
+    --selected: #0094ff;
+    --danger: #ff4d5e;
+    --danger-soft: rgba(255, 77, 94, 0.16);
+    --warn: #ffa726;
+    --warn-soft: rgba(255, 167, 38, 0.16);
+    --ok: #22d37c;
+    --ok-soft: rgba(34, 211, 124, 0.16);
+    --cyan: #22d3ee;            /* extra accent for highlights */
+    --border: #1f2c45;
+    --border-strong: #2a3a58;
     --radius-sm: 6px;
     --radius: 10px;
     --radius-lg: 14px;
-    --shadow-sm: 0 1px 2px rgba(0,0,0,0.25);
-    --shadow: 0 4px 16px rgba(0,0,0,0.32);
-    --shadow-lg: 0 12px 40px rgba(0,0,0,0.48);
+    --shadow-sm: 0 1px 2px rgba(0, 5, 20, 0.30);
+    --shadow: 0 6px 24px rgba(0, 8, 24, 0.45);
+    --shadow-lg: 0 16px 48px rgba(0, 8, 24, 0.60);
     --t-fast: 120ms cubic-bezier(.2,.7,.3,1);
     --t-base: 200ms cubic-bezier(.2,.7,.3,1);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%; }
   body {
-    background: var(--bg);
+    background:
+      radial-gradient(circle at 0% 0%, rgba(0, 148, 255, 0.06), transparent 60%),
+      radial-gradient(circle at 100% 100%, rgba(34, 211, 238, 0.04), transparent 55%),
+      var(--bg);
     color: var(--fg);
     font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-feature-settings: "cv11", "ss01", "ss03";
@@ -49,21 +57,38 @@
   }
   header {
     height: 56px;
-    background: linear-gradient(180deg, rgba(255,255,255,0.012), transparent), var(--bg-2);
+    background: linear-gradient(180deg, rgba(0, 148, 255, 0.04), transparent), var(--bg-2);
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
     padding: 0 18px;
     gap: 12px;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
   }
   header h1 {
-    font-size: 14px;
+    font-size: 14.5px;
     margin: 0;
-    font-weight: 600;
+    font-weight: 700;
     letter-spacing: -0.01em;
     display: inline-flex;
     align-items: baseline;
-    gap: 6px;
+    gap: 8px;
+    background: linear-gradient(90deg, #ffffff, #b8d8ff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  header h1::before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 12px var(--accent);
+    margin-right: 2px;
+    align-self: center;
   }
   header h1 .version-tag {
     font-size: 10.5px;
@@ -71,6 +96,7 @@
     color: var(--fg-faint);
     font-family: ui-monospace, "JetBrains Mono", monospace;
     letter-spacing: 0;
+    -webkit-text-fill-color: var(--fg-faint);
   }
   header .status { color: var(--fg-dim); font-size: 12.5px; }
   header .grow { flex: 1; }
@@ -97,11 +123,12 @@
     background: linear-gradient(180deg, var(--accent), var(--accent-2));
     border-color: transparent;
     color: white;
-    box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, var(--shadow-sm);
+    font-weight: 600;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.10) inset, 0 0 0 1px var(--accent-2), 0 2px 8px var(--accent-soft);
   }
   button.primary:hover:not(:disabled) {
-    background: linear-gradient(180deg, #7779f5, #5b53ed);
-    border-color: transparent;
+    background: linear-gradient(180deg, var(--accent-3), var(--accent));
+    box-shadow: 0 1px 0 rgba(255,255,255,0.15) inset, 0 0 0 1px var(--accent), 0 4px 16px var(--accent-glow);
   }
   button.danger {
     background: var(--danger);
@@ -136,10 +163,20 @@
     box-shadow: 0 0 8px currentColor;
   }
   .pill.state-enhancing .dot,
-  .pill.state-fetching .dot { background: var(--accent); color: var(--accent); animation: pulse 1.5s ease-in-out infinite; }
-  .pill.state-sleeping .dot { background: var(--ok); color: var(--ok); }
-  .pill.state-error .dot { background: var(--danger); color: var(--danger); }
-  .pill.state-idle .dot { background: var(--fg-dim); color: var(--fg-dim); box-shadow: none; }
+  .pill.state-fetching .dot {
+    background: var(--accent); color: var(--accent);
+    box-shadow: 0 0 12px var(--accent);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  .pill.state-sleeping .dot {
+    background: var(--ok); color: var(--ok);
+    box-shadow: 0 0 10px var(--ok);
+  }
+  .pill.state-error .dot {
+    background: var(--danger); color: var(--danger);
+    box-shadow: 0 0 10px var(--danger);
+  }
+  .pill.state-idle .dot { background: var(--fg-faint); box-shadow: none; }
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.35; }
@@ -204,22 +241,34 @@
     letter-spacing: -0.005em;
   }
   .identity .info .count { color: var(--fg-dim); font-size: 11px; margin-top: 1px; }
-  .identity.armed { background: var(--accent-soft); border-color: var(--accent); }
+  .identity.armed {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent-soft), 0 4px 16px -4px var(--accent-glow);
+  }
   .identity.armed .key { background: var(--accent); color: white; }
-  .identity.active { background: var(--bg-hover); border-color: var(--border-strong); }
+  .identity.armed .info .name { color: var(--fg); }
+  .identity.active {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
   /* When the user has unnamed cards selected, identities turn into 'drop here'
      targets — visible glow on hover makes the merge action discoverable. */
   .sidebar.merge-mode .identity { cursor: copy; }
   .sidebar.merge-mode .identity:hover {
-    background: rgba(67, 196, 126, 0.18);
-    border-color: var(--ok);
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent-soft);
   }
   .sidebar.merge-mode .identity:hover::after {
     content: "← merge";
     margin-left: auto;
-    color: var(--ok);
+    color: var(--accent);
     font-size: 10px;
-    font-weight: 600;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
   }
   .new-id {
     display: flex; align-items: center; gap: 11px;
@@ -307,10 +356,14 @@
     user-drag: none;
     pointer-events: none;
   }
-  .card:hover { border-color: var(--border-strong); transform: translateY(-1px); box-shadow: var(--shadow); }
+  .card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow), 0 0 24px -8px var(--accent-glow);
+  }
   .card.selected {
     border-color: var(--selected);
-    box-shadow: 0 0 0 1px var(--selected), 0 0 24px -4px var(--accent-soft);
+    box-shadow: 0 0 0 2px var(--selected), 0 0 32px -4px var(--accent-glow);
   }
   .card.selected::after {
     content: "✓";
@@ -320,14 +373,14 @@
     background: var(--selected);
     color: white;
     border-radius: 50%;
-    width: 20px;
-    height: 20px;
+    width: 22px;
+    height: 22px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 700;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    box-shadow: 0 2px 12px var(--accent-glow), 0 1px 0 rgba(255,255,255,0.20) inset;
   }
   .card img {
     width: 100%;
@@ -1371,18 +1424,33 @@ async function letAiPickBestAvatar() {
   $("ai-pick-reason").style.display = "none";
 
   try {
+    // Pass the eids of the tiles currently rendered so the AI must pick from
+    // them — otherwise the picker considers a wider/different pool and may
+    // return an id we can't highlight.
+    const displayedEids = Array.from(
+      document.querySelectorAll("#best-avatar-candidates .avatar-tile[data-eid]")
+    ).map(t => t.dataset.eid);
+    if (displayedEids.length === 0) {
+      toast("No candidates to choose from", "error");
+      return;
+    }
+    const qs = new URLSearchParams({ eids: displayedEids.join(",") });
     // Preview-only call — returns the chosen enhancedImageId without saving.
-    const res = await api("GET", `/api/identities/${g.id}/best-avatar-ai-suggest`);
+    const res = await api("GET", `/api/identities/${g.id}/best-avatar-ai-suggest?${qs}`);
     const tile = document.querySelector(`.avatar-tile[data-eid="${res.enhancedImageId}"]`);
     if (tile) {
       tile.classList.add("ai-pick");
       tile.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      if (res.reason) {
+        $("ai-pick-reason").textContent = `🤖 ${res.reason} — click the highlighted tile to apply, or pick a different one.`;
+        $("ai-pick-reason").style.display = "";
+      }
+      toast(`AI picked one of the candidates`, "ok");
+    } else {
+      // Defensive: should never happen now that we pass eids, but keep the
+      // user informed instead of silently doing nothing.
+      toast(`AI picked id ${res.enhancedImageId} but it isn't displayed — try again`, "error");
     }
-    if (res.reason) {
-      $("ai-pick-reason").textContent = `🤖 ${res.reason} — click the highlighted tile to apply, or pick a different one.`;
-      $("ai-pick-reason").style.display = "";
-    }
-    toast(`AI picked one of the candidates`, "ok");
   } catch (e) {
     toast(`AI pick failed: ${e.message}`, "error");
   } finally {

@@ -402,9 +402,16 @@ def create_app(client: ProtectClient) -> FastAPI:
         invalidate_ref_image(group_id)
         return {"ok": True, "enhancedImageId": body.enhancedImageId}
 
-    def _gemini_pick_best(group_id: str, max_candidates: int) -> dict:
+    def _gemini_pick_best(group_id: str, max_candidates: int,
+                          only_eids: list[str] | None = None) -> dict:
         """Internal helper. Returns {enhancedImageId, detectionId, reason,
-        candidatesConsidered}. Does NOT upload — caller decides."""
+        candidatesConsidered}. Does NOT upload — caller decides.
+
+        When `only_eids` is provided, the pick is restricted to those exact
+        enhancedImageIds. This is what the frontend passes so the picked tile
+        is guaranteed to be one of the displayed candidates (avoids the bug
+        where AI picked an id not in the visible grid → no highlight).
+        """
         if gemini is None:
             raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY.")
 
@@ -426,6 +433,9 @@ def create_app(client: ProtectClient) -> FastAPI:
             raise HTTPException(404, "no detections for this identity")
 
         enhanced = [d for d in all_dets if d.get("enhancedImageId")]
+        if only_eids:
+            eid_set = set(only_eids)
+            enhanced = [d for d in enhanced if d.get("enhancedImageId") in eid_set]
         if not enhanced:
             raise HTTPException(400, "no enhanced detections yet — run the enhancer first")
         enhanced.sort(key=lambda d: d.get("matchedGroupConfidence") or 0, reverse=True)
@@ -455,10 +465,18 @@ def create_app(client: ProtectClient) -> FastAPI:
         }
 
     @app.get("/api/identities/{group_id}/best-avatar-ai-suggest")
-    def suggest_best_avatar_ai(group_id: str, max_candidates: int = Query(12, ge=2, le=20)) -> dict:
+    def suggest_best_avatar_ai(
+        group_id: str,
+        max_candidates: int = Query(12, ge=2, le=20),
+        eids: str = Query("", description="Comma-separated enhancedImageIds "
+                                          "the AI must pick from. The UI sends "
+                                          "the displayed tiles so the picked "
+                                          "id always matches a visible tile."),
+    ) -> dict:
         """Same picker as the apply endpoint but returns the choice WITHOUT
         uploading. Lets the UI preview before the user commits."""
-        return _gemini_pick_best(group_id, max_candidates)
+        only_eids = [e for e in (eids or "").split(",") if e] or None
+        return _gemini_pick_best(group_id, max_candidates, only_eids=only_eids)
 
     @app.post("/api/identities/{group_id}/best-avatar-ai")
     def apply_best_avatar_ai(group_id: str, max_candidates: int = Query(12, ge=2, le=20)) -> dict:
