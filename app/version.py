@@ -8,5 +8,5 @@ Bumped on every behavioural change. Follow loose semver:
 See CHANGELOG.md for the per-version log.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 __build_date__ = "2026-05-19"

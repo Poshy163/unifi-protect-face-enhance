@@ -2,6 +2,12 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.1.2 — 2026-05-19
+
+- Fix: "🤖 AI pick" badge on the best-avatar tile was getting clipped by
+  the candidate grid's scroll container. Moved inside the tile as a
+  corner-pill overlay with backdrop blur — no longer cut off.
+
 ## 0.1.1 — 2026-05-19
 
 - Add explicit version tracking. `app/version.py` is the source of truth.

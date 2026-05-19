@@ -362,7 +362,9 @@
     border-color: var(--ok);
     transform: scale(1.02);
   }
-  /* Highlight ring around the AI's recommended best-avatar tile */
+  /* Highlight ring + corner tag for the AI's recommended best-avatar tile.
+     Tag is positioned INSIDE the tile so it doesn't get clipped by the
+     scroll container's overflow. */
   .ai-pick {
     border-color: var(--ok) !important;
     box-shadow: 0 0 0 2px var(--ok), 0 0 24px -4px var(--ok-soft) !important;
@@ -371,16 +373,21 @@
   .ai-pick::before {
     content: "🤖 AI pick";
     position: absolute;
-    top: -10px; left: 50%;
-    transform: translateX(-50%);
-    background: var(--ok);
-    color: #04231a;
+    top: 12px;
+    left: 12px;
+    background: rgba(16, 185, 129, 0.94);
+    color: #022c1c;
     font-weight: 700;
-    font-size: 10px;
-    padding: 2px 8px;
+    font-size: 9.5px;
+    padding: 3px 8px;
     border-radius: 999px;
     white-space: nowrap;
-    z-index: 1;
+    z-index: 2;
+    letter-spacing: 0.02em;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
   }
 
   /* Best-avatar picker tiles */
