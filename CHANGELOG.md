@@ -2,6 +2,22 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.3.1 — 2026-06-25
+
+- **Fix: profile photos never updated in triage.** The avatar endpoint served
+  an arbitrary *enhanced detection crop* (`find_enhanced_id_for_group`) rather
+  than the group's reference/cover image — verified on a live instance the two
+  are entirely different images (22.7 KB cover vs 8.5 KB crop). So editing a
+  person's photo in the Protect UI changed the cover but the triage avatar,
+  pinned to a detection crop, never moved. Compounding it, avatars were sent
+  with `Cache-Control: ... immutable, max-age=3600`, freezing them for an hour.
+  Now `GET /api/groups/{id}/avatar` serves the **cover photo by default** (1:1
+  with what Protect shows) with a short, non-`immutable` cache so external
+  edits propagate within ~a minute. `?enhanced=true` still serves the
+  sharpened crop for anyone who wants it, and the **Refresh** button now
+  force-busts avatar URLs for an instant update. Detection thumbnails stay
+  `immutable` (they're content-addressed).
+
 ## 0.3.0 — 2026-06-25
 
 - **Feature: ⚡ Auto-match** — a one-shot bulk identity matcher. Instead of

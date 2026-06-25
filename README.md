@@ -53,8 +53,8 @@ quality-of-life touches.
 
 The grid shows every **unnamed** face cluster (`face_NNNN` plus any anonymous
 clusters), sorted most-recent first. The sidebar shows every **named identity**.
-Cards display the **enhanced** face crop when available — much clearer than
-the raw cluster avatar Protect itself uses.
+Avatars mirror Protect's own **reference/cover photo** for each face, so a
+photo you set in the Protect UI (or via 🎯 Best avatar here) shows up 1:1.
 
 Click the **"Face Triage" title** in the top-left at any time to jump back to
 this view (it clears the current selection and scrolls to the top).
@@ -212,7 +212,7 @@ reference — see [app/webapp.py](app/webapp.py) for full schemas.
 # Browse
 GET  /api/identities                        # named clusters, sorted by recency
 GET  /api/unenrolled?offset=N&limit=N       # unnamed clusters
-GET  /api/groups/{id}/avatar                # cover image (enhanced when available)
+GET  /api/groups/{id}/avatar                # cover image (Protect's reference photo; ?enhanced=true for a sharpened crop)
 GET  /api/groups/{id}/detections            # paginated
 GET  /api/identities/{id}/detections        # alias for the above, scoped to a named cluster
 GET  /api/thumbnails/{id}?enhanced=bool     # single face crop

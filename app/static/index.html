@@ -2050,7 +2050,9 @@ function attachInfiniteScroll(gridEl, loader) {
 // ============================================================
 // WIRE UP CONTROLS
 // ============================================================
-$("btn-refresh").addEventListener("click", refreshAll);
+// Manual refresh also force-busts avatar URLs, so a cover photo edited in the
+// Protect UI shows up immediately rather than waiting out the browser cache.
+$("btn-refresh").addEventListener("click", () => { bumpAvatarVersion(); refreshAll(); });
 // Clicking the "Face Triage" title acts as a home button: leave the detail
 // view, drop any selection/armed identity, and scroll the grid back to top.
 $("home-link").addEventListener("click", () => {

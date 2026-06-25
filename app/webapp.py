@@ -192,10 +192,16 @@ def create_app(client: ProtectClient) -> FastAPI:
         return {"total": total, "offset": offset, "limit": limit, "items": page}
 
     @app.get("/api/groups/{group_id}/avatar")
-    def avatar(group_id: str, enhanced: bool = Query(True)) -> Response:
-        """Group cover image. By default we serve an *enhanced* face crop from
-        one of the group's detections (much clearer than the raw avatar);
-        pass ?enhanced=false to force the raw group image."""
+    def avatar(group_id: str, enhanced: bool = Query(False)) -> Response:
+        """Group cover image — the SAME reference photo Protect shows in its
+        own UI, so editing a person's photo there (or via 🎯 Best avatar here)
+        is mirrored 1:1. Pass ?enhanced=true to instead serve a sharpened face
+        crop picked from the group's enhanced detections.
+
+        Cache-Control is deliberately short and NOT `immutable`: the avatar is
+        keyed by a mutable group id, so a cover photo changed anywhere outside
+        this app must be allowed to propagate. (Detection thumbnails below are
+        content-addressed and stay immutable.)"""
         if enhanced:
             eid = client.find_enhanced_id_for_group(group_id)
             if eid:
@@ -204,16 +210,16 @@ def create_app(client: ProtectClient) -> FastAPI:
                     return Response(
                         content=r.content,
                         media_type=r.headers.get("content-type", "image/jpeg"),
-                        headers={"Cache-Control": "private, max-age=3600, immutable"},
+                        headers={"Cache-Control": "private, max-age=60"},
                     )
-        # Fall back to the raw group avatar.
+        # Default: the raw group reference image (Protect's cover photo).
         r = client.get(f"{BASE_PROTECT}/recognition/face/groups/{group_id}/image")
         if r.status_code != 200:
             raise HTTPException(r.status_code, "avatar fetch failed")
         return Response(
             content=r.content,
             media_type=r.headers.get("content-type", "image/jpeg"),
-            headers={"Cache-Control": "private, max-age=3600, immutable"},
+            headers={"Cache-Control": "private, max-age=60"},
         )
 
     @app.get("/api/groups/{group_id}/detections")
