@@ -56,6 +56,9 @@ clusters), sorted most-recent first. The sidebar shows every **named identity**.
 Cards display the **enhanced** face crop when available — much clearer than
 the raw cluster avatar Protect itself uses.
 
+Click the **"Face Triage" title** in the top-left at any time to jump back to
+this view (it clears the current selection and scrolls to the top).
+
 - **Click** card → select. **Shift-click** → range. **A** → select all. **Esc** → clear.
 - **Click an identity** in the sidebar → merges the selection into it.
 - **Drag a card** onto an identity → also merges (the whole card drags, not the image).
@@ -64,10 +67,16 @@ the raw cluster avatar Protect itself uses.
   name, then merges the rest into it.
 - **Del** or **Backspace** → bulk-deletes selected face groups (cluster *and*
   its detections — permanent).
-- **🤖 AI suggest** → walks every unnamed card and uses Google Gemini to
-  suggest a matching identity. Each suggestion is shown with **Y** (merge)
-  or **N** (skip). Pre-fetches the next card while you review the current.
-  Requires `GEMINI_API_KEY`.
+- **⚡ Auto-match** → the fast path. Classifies every loaded unnamed face
+  against your named identities in one shot (in parallel) and shows a single
+  **bulk review list**: each unnamed face next to its suggested identity,
+  confidence, and reason. Matches at ≥85% confidence are pre-checked, so the
+  common case is one click to merge dozens of faces at once. Untick any you
+  disagree with first. Requires `GEMINI_API_KEY`. To match faces beyond the
+  first page, scroll the grid to load more, then run it.
+- **🤖 AI suggest** → the step-through alternative: walks unnamed cards one at
+  a time, each shown with **Y** (merge) or **N** (skip). Pre-fetches the next
+  card while you review the current. Requires `GEMINI_API_KEY`.
 
 ### Per-identity detail view
 
@@ -133,6 +142,9 @@ All config is read from environment variables — see
 | `WEBAPP_ENABLED` | `true` | Serve the Face Triage webapp |
 | `WEBAPP_PORT` | `8080` | Port to bind (use the same value in compose port mapping) |
 | `WEBAPP_HOST` | `0.0.0.0` | Bind interface |
+| `PHANTOM_WINDOWS` | `4` | Sliding-window passes over `/events` to harvest faces missing from the groups listing. Each ≈ 1 day deeper. Bump for a deep one-off sweep of old faces. |
+| `PHANTOM_EVENT_LIMIT` | `1000` | Events fetched per window (Protect caps around 1000). |
+| `PHANTOM_CACHE_TTL` | `45` | Seconds to cache the harvested set. |
 
 ### Gemini AI suggest (optional)
 
@@ -140,6 +152,7 @@ All config is read from environment variables — see
 | --- | --- | --- |
 | `GEMINI_API_KEY` | *(empty)* | Enables 🤖 AI suggest. Get one at https://aistudio.google.com/app/apikey |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Override the model. `gemini-2.5-flash-lite` is cheapest (~$0.0003/query) but less accurate; `gemini-2.5-pro` is best (~$0.005/query). |
+| `AI_BATCH_WORKERS` | `6` | Parallel workers for the ⚡ Auto-match batch matcher. Higher = faster, but more concurrent Gemini calls. |
 
 ## How throttling works
 
@@ -175,6 +188,9 @@ POST   /proxy/protect/api/recognition/face/detections/{id}/image/enhance
 PATCH  /proxy/protect/api/recognition/face/detections/{id}/enhanced-image    # hide/show
 POST   /proxy/protect/api/recognition/face/assign-group             # {objectIds, groupId|null}
 POST   /proxy/protect/api/recognition/v2/merge-group                # {fromGroupIds, toGroupId}
+
+# Events (face harvest — see note below)
+GET    /proxy/protect/api/events?type=smartDetectZone&orderDirection=DESC&start=&end=&limit=
 
 # Thumbnails
 GET    /proxy/protect/api/thumbnails/{thumbnailId}                  # raw face crop
@@ -220,8 +236,15 @@ POST /api/retroactive/cancel
 
 # AI (Gemini)
 GET  /api/ai/status                         # {available, sdk_installed}
-GET  /api/ai/suggest?groupId=...            # {identityId, name, confidence, reason}
+GET  /api/ai/suggest?groupId=...            # one face → {identityId, name, confidence, reason}
+POST /api/ai/suggest-batch                  # {groupIds:[...]} → {results:[{groupId, identityId, name, confidence, reason}]}
 ```
+
+The triage list (`GET /api/unenrolled`) merges two sources so no face is
+missed: Protect's `/recognition/face/groups` listing **plus** a sliding-window
+harvest of recent `smartDetectZone` events (group ids are read from both the
+thumbnail `group` object and its `labels` array). Tune depth with
+`PHANTOM_WINDOWS` / `PHANTOM_EVENT_LIMIT` / `PHANTOM_CACHE_TTL`.
 
 ## Versioning
 

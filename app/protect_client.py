@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 import time
 from typing import Any
@@ -148,8 +149,31 @@ class ProtectClient:
             cache["at"] = 0.0
             cache["data"] = []
 
-    def harvest_phantom_groups(self, window_hours: int = 168,
-                               cache_ttl: float = 4.0) -> list[dict]:
+    @staticmethod
+    def _thumb_group(t: dict) -> tuple[str | None, str | None, str | None]:
+        """Extract (group_id, group_type, matched_name) from a face thumbnail.
+
+        Protect stashes the group two different ways and neither is reliably
+        present on its own — verified against a live instance:
+          - `thumb.group` object: {"id", "matchedName", ...} (most thumbnails)
+          - `thumb.labels`: ["group:<id>", "groupType:degraded|known|unknown"]
+            (~6% of thumbnails carry the id ONLY here)
+        We union both so no referenced group slips through.
+        """
+        g = t.get("group") or {}
+        gid = g.get("id")
+        gtype = None
+        matched = g.get("matchedName")
+        for lab in (t.get("labels") or []):
+            if lab.startswith("group:") and not gid:
+                gid = lab.split(":", 1)[1] or None
+            elif lab.startswith("groupType:"):
+                gtype = lab.split(":", 1)[1] or None
+        return gid, gtype, matched
+
+    def harvest_phantom_groups(self, windows: int | None = None,
+                               event_limit: int | None = None,
+                               cache_ttl: float | None = None) -> list[dict]:
         """Walk recent smartDetectZone events and return synthetic records
         for every face group referenced that isn't in /recognition/face/groups.
 
@@ -157,7 +181,24 @@ class ProtectClient:
         clusters and most face_degraded_* singletons don't appear there, even
         though their detections exist and can be fetched per-id. This bridges
         that gap so the UI shows every face Protect has seen.
+
+        Coverage notes (verified against a live Protect 7.x instance):
+          - /events is hard-capped at ~1000 results per request and IGNORES
+            the `page` param, so a single call only reaches ~30h back. To see
+            every face we walk a SLIDING WINDOW: each pass sets the next
+            `end` to (oldest event start - 1) and refetches. `windows` passes
+            cover roughly `windows` days. Defaults come from env so a deep
+            one-off sweep is just a config bump, no redeploy.
+          - orderDirection=DESC is mandatory; without it the API returns the
+            OLDEST events first and the recent clusters never appear.
         """
+        if windows is None:
+            windows = max(1, int(os.getenv("PHANTOM_WINDOWS", "4") or 4))
+        if event_limit is None:
+            event_limit = int(os.getenv("PHANTOM_EVENT_LIMIT", "1000") or 1000)
+        if cache_ttl is None:
+            cache_ttl = float(os.getenv("PHANTOM_CACHE_TTL", "45") or 45)
+
         cache_attr = "_phantom_cache"
         lock_attr = "_phantom_lock"
         if not hasattr(self, lock_attr):
@@ -171,52 +212,65 @@ class ProtectClient:
                 return cache["data"]
 
         listed = {g["id"] for g in self.list_face_groups()}
+        far_start = int(now * 1000) - 366 * 86400 * 1000  # 1y floor, server caps anyway
         end_ms = int(now * 1000)
-        start_ms = end_ms - window_hours * 3600 * 1000
 
-        # CRITICAL: Protect's /events endpoint defaults to ASCending order.
-        # Without orderDirection=DESC, `limit=500` over a 7-day window grabs
-        # the OLDEST 500 events and misses everything recent — meaning new
-        # face clusters never appear in the triage UI. Verified against a
-        # live Protect 7.1.55 instance: without DESC, harvest returned 0
-        # phantoms because every event was 6+ days old.
-        r = self.get(
-            f"{BASE_PROTECT}/events",
-            params={"start": start_ms, "end": end_ms,
-                    "type": "smartDetectZone", "limit": 500,
-                    "orderDirection": "DESC"},
-            timeout=60,
-        )
-        if r.status_code != 200:
-            return []
-
-        # group_id -> {count, last_ts}
+        # group_id -> {count, last_ts, first_ts, matchedName, groupType}
         seen: dict[str, dict] = {}
-        for ev in r.json():
-            ts = ev.get("start") or 0
-            for t in ((ev.get("metadata") or {}).get("detectedThumbnails") or []):
-                if t.get("type") != "face":
-                    continue
-                g = t.get("group") or {}
-                gid = g.get("id")
-                if not gid or gid in listed:
-                    continue
-                entry = seen.setdefault(gid, {"count": 0, "last_ts": 0,
-                                              "first_ts": ts or 0, "matchedName": g.get("matchedName")})
-                entry["count"] += 1
-                if (ts or 0) > entry["last_ts"]:
-                    entry["last_ts"] = ts or 0
-                if (ts or 0) < entry["first_ts"] or entry["first_ts"] == 0:
-                    entry["first_ts"] = ts or 0
+        for _ in range(windows):
+            r = self.get(
+                f"{BASE_PROTECT}/events",
+                params={"start": far_start, "end": end_ms,
+                        "type": "smartDetectZone", "limit": event_limit,
+                        "orderDirection": "DESC"},
+                timeout=60,
+            )
+            if r.status_code != 200:
+                break
+            events = r.json()
+            if not events:
+                break
+            oldest = end_ms
+            for ev in events:
+                ts = ev.get("start") or 0
+                if ts and ts < oldest:
+                    oldest = ts
+                for t in ((ev.get("metadata") or {}).get("detectedThumbnails") or []):
+                    if t.get("type") != "face":
+                        continue
+                    gid, gtype, matched = self._thumb_group(t)
+                    if not gid or gid in listed:
+                        continue
+                    entry = seen.setdefault(gid, {"count": 0, "last_ts": 0,
+                                                  "first_ts": ts or 0,
+                                                  "matchedName": matched,
+                                                  "groupType": gtype})
+                    entry["count"] += 1
+                    if matched and not entry.get("matchedName"):
+                        entry["matchedName"] = matched
+                    if gtype and not entry.get("groupType"):
+                        entry["groupType"] = gtype
+                    if (ts or 0) > entry["last_ts"]:
+                        entry["last_ts"] = ts or 0
+                    if (ts or 0) < entry["first_ts"] or entry["first_ts"] == 0:
+                        entry["first_ts"] = ts or 0
+            # Step the window back. Stop if we made no backward progress
+            # (server returned the same tail again).
+            next_end = oldest - 1
+            if next_end >= end_ms:
+                break
+            end_ms = next_end
 
         synthetic = []
         for gid, info in seen.items():
+            degraded = gid.startswith("face_degraded_") or info.get("groupType") == "degraded"
             synthetic.append({
                 "id": gid,
                 "name": None,
                 "matchedName": info.get("matchedName") or "",
                 "type": "face",
-                "isDegraded": gid.startswith("face_degraded_"),
+                "isDegraded": degraded,
+                "groupType": info.get("groupType"),
                 "detectionsCount": info["count"],
                 "firstDetectedAt": info["first_ts"] or None,
                 "lastDetectedAt": info["last_ts"] or None,

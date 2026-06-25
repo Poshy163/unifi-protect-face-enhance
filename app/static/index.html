@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Face Triage</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root {
     /* UniFi-inspired palette — navy base, vibrant cyan-blue accent, brighter
@@ -78,7 +79,19 @@
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    padding: 4px 6px;
+    margin-left: -6px;
+    transition: background-color var(--t-fast);
+    -webkit-user-select: none;
+    user-select: none;
   }
+  header h1:hover { background-color: var(--accent-soft); }
+  header h1::before {
+    transition: box-shadow var(--t-fast), transform var(--t-fast);
+  }
+  header h1:hover::before { transform: scale(1.25); }
   header h1::before {
     content: "";
     display: inline-block;
@@ -629,11 +642,47 @@
     color: var(--fg-dim);
     border: 1px solid var(--border);
   }
+
+  /* Auto-match bulk review rows */
+  .am-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg-3);
+    cursor: pointer;
+    transition: border-color var(--t-fast), background var(--t-fast);
+  }
+  .am-row:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+  .am-row.checked { border-color: var(--accent); background: var(--accent-soft); }
+  .am-row.disabled { opacity: 0.55; cursor: default; }
+  .am-row input[type=checkbox] { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--accent); }
+  .am-row img {
+    width: 44px; height: 44px; border-radius: 8px; object-fit: cover;
+    background: var(--bg); box-shadow: 0 0 0 1px var(--border); flex-shrink: 0;
+  }
+  .am-row .am-arrow { color: var(--fg-faint); font-size: 14px; flex-shrink: 0; }
+  .am-row .am-info { flex: 1; min-width: 0; }
+  .am-row .am-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .am-row .am-reason { font-size: 11px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .am-row .am-conf {
+    flex-shrink: 0; font-family: ui-monospace, monospace; font-size: 11.5px;
+    font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    background: var(--bg); color: var(--fg-dim);
+  }
+  .am-row .am-conf.high { background: var(--ok-soft); color: #6ee7b7; }
+  .am-row .am-conf.mid { background: var(--warn-soft); color: #fcd9a0; }
+  .am-section-label {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--fg-faint); font-weight: 600; margin: 10px 2px 2px;
+  }
 </style>
 </head>
 <body>
   <header>
-    <h1>Face Triage <span class="version-tag" id="version-tag" title="Build date"></span></h1>
+    <h1 id="home-link" title="Back to triage (home)">Face Triage <span class="version-tag" id="version-tag" title="Build date"></span></h1>
     <span class="status" id="header-status">loading…</span>
     <div class="grow"></div>
     <div class="pill" id="enhancer-pill" title="Click for enhancer status">
@@ -665,7 +714,8 @@
             <input type="checkbox" id="toggle-degraded" checked>
             <span>Show low-quality</span>
           </label>
-          <button id="btn-ai-suggest" title="Use Gemini to suggest identities for unnamed faces">🤖 AI suggest</button>
+          <button id="btn-automatch" class="primary" title="Match the loaded unnamed faces against your identities all at once, then approve the matches in bulk. Scroll to load more first to match more.">⚡ Auto-match</button>
+          <button id="btn-ai-suggest" title="Step through unnamed faces one at a time with Gemini suggestions">🤖 AI suggest</button>
           <button id="btn-delete" class="danger" disabled>Delete</button>
           <span class="info">drag onto identity · click to merge ·
             <span class="kbd">1</span>–<span class="kbd">9</span> ·
@@ -808,6 +858,26 @@
         <div style="display:flex;gap:8px">
           <button id="ai-no">N · Skip</button>
           <button id="ai-yes" class="primary">Y · Merge</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Auto-match bulk review modal -->
+  <div class="modal-backdrop" id="modal-automatch">
+    <div class="modal" style="min-width:680px;max-width:940px;width:90vw">
+      <h3>⚡ Auto-match <span id="am-summary" style="color:var(--fg-dim);font-weight:500;font-size:13px"></span></h3>
+      <p id="am-status">Matching unnamed faces against your identities…</p>
+      <div id="am-list" style="max-height:54vh;overflow-y:auto;display:flex;flex-direction:column;gap:5px;margin:4px 0"></div>
+      <div class="actions" style="justify-content:space-between;margin-top:14px">
+        <div style="display:flex;gap:8px">
+          <button id="am-select-high" title="Select every match at or above the confidence threshold">Select ≥85%</button>
+          <button id="am-select-all" title="Select all matches">All</button>
+          <button id="am-clear">Clear</button>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button id="am-cancel">Cancel</button>
+          <button id="am-apply" class="primary" disabled>Merge <span id="am-apply-count">0</span></button>
         </div>
       </div>
     </div>
@@ -1704,6 +1774,203 @@ function aiNo() {
 }
 
 // ============================================================
+// AUTO-MATCH — classify ALL unnamed cards at once, review in bulk
+// ============================================================
+const automatch = { results: [], selected: new Set(), threshold: 0.85 };
+
+async function startAutoMatch() {
+  let st;
+  try { st = await api("GET", "/api/ai/status"); }
+  catch (e) { toast(`AI status check failed: ${e.message}`, "error"); return; }
+  if (!st.available) {
+    toast("Gemini not configured. Set GEMINI_API_KEY env var.", "error");
+    return;
+  }
+  if (state.identities.length === 0) {
+    toast("No named identities to match against yet — name a few faces first.", "error");
+    return;
+  }
+  const ids = state.cards.map(c => c.id);
+  if (ids.length === 0) { toast("No unnamed faces to match", "error"); return; }
+
+  automatch.results = [];
+  automatch.selected = new Set();
+  $("modal-automatch").classList.add("show");
+  $("am-summary").textContent = "";
+  const moreHint = state.cards.length < state.unenrolledTotal
+    ? ` (${state.unenrolledTotal - state.cards.length} more not loaded — scroll the grid first to include them)`
+    : "";
+  $("am-status").textContent =
+    `Matching ${ids.length} unnamed face${ids.length === 1 ? "" : "s"} against ${state.identities.length} identities… this can take a few seconds.${moreHint}`;
+  $("am-list").innerHTML =
+    `<div style="color:var(--fg-dim);padding:24px;text-align:center">🤖 Thinking… analysing ${ids.length} face${ids.length === 1 ? "" : "s"} in parallel</div>`;
+  $("am-apply").disabled = true;
+  $("am-apply-count").textContent = "0";
+
+  try {
+    const res = await api("POST", "/api/ai/suggest-batch", { groupIds: ids });
+    automatch.results = res.results || [];
+    // Pre-select confident matches so the common case is a single click.
+    automatch.results.forEach(r => {
+      if (r.identityId && (r.confidence || 0) >= automatch.threshold) {
+        automatch.selected.add(r.groupId);
+      }
+    });
+    renderAutoMatch();
+  } catch (e) {
+    $("am-status").textContent = "Failed";
+    $("am-list").innerHTML =
+      `<div style="color:var(--danger);padding:16px">Auto-match failed: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function amIdentityName(identityId, fallback) {
+  const g = state.identities.find(i => i.id === identityId);
+  return g ? (g.name || "(unnamed)") : (fallback || identityId);
+}
+
+function renderAutoMatch() {
+  const matches = automatch.results.filter(r => r.identityId)
+    .sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+  const unknown = automatch.results.filter(r => !r.identityId && !r.error);
+  const errored = automatch.results.filter(r => r.error);
+
+  const list = $("am-list");
+  list.innerHTML = "";
+
+  if (matches.length === 0 && unknown.length === 0 && errored.length === 0) {
+    list.innerHTML = `<div class="empty">No results.</div>`;
+  }
+
+  if (matches.length) {
+    const lbl = document.createElement("div");
+    lbl.className = "am-section-label";
+    lbl.textContent = `Suggested matches (${matches.length})`;
+    list.appendChild(lbl);
+    matches.forEach(r => list.appendChild(amRow(r)));
+  }
+
+  if (unknown.length) {
+    const lbl = document.createElement("div");
+    lbl.className = "am-section-label";
+    lbl.textContent = `No confident match (${unknown.length})`;
+    list.appendChild(lbl);
+    unknown.forEach(r => list.appendChild(amRow(r)));
+  }
+
+  if (errored.length) {
+    const lbl = document.createElement("div");
+    lbl.className = "am-section-label";
+    lbl.textContent = `Errors (${errored.length})`;
+    list.appendChild(lbl);
+    errored.forEach(r => list.appendChild(amRow(r)));
+  }
+
+  const total = automatch.results.length;
+  $("am-summary").textContent =
+    `· ${matches.length} matched · ${unknown.length} unknown` + (errored.length ? ` · ${errored.length} errored` : "");
+  $("am-status").textContent = matches.length
+    ? "Checked rows will be merged into the suggested identity. Click a row to toggle."
+    : "No confident matches. Try “🤖 AI suggest” to step through manually, or name a few faces first.";
+  amUpdateApplyButton();
+}
+
+function amRow(r) {
+  const row = document.createElement("div");
+  const matched = !!r.identityId;
+  const checked = automatch.selected.has(r.groupId);
+  const confPct = Math.round((r.confidence || 0) * 100);
+  const confCls = confPct >= 85 ? "high" : (confPct >= 70 ? "mid" : "");
+  row.className = "am-row" + (checked ? " checked" : "") + (matched ? "" : " disabled");
+  row.dataset.gid = r.groupId;
+
+  const suggestImg = matched
+    ? `<img loading="lazy" src="${avatarUrl(r.identityId)}" onerror="this.style.opacity=0.2">`
+    : `<div style="width:44px;height:44px;border-radius:8px;background:var(--bg);display:flex;align-items:center;justify-content:center;color:var(--fg-faint);font-size:11px;flex-shrink:0">?</div>`;
+  const right = matched
+    ? `<div class="am-name">${escapeHtml(amIdentityName(r.identityId, r.name))}</div>
+       <div class="am-reason">${escapeHtml(r.reason || "")}</div>`
+    : (r.error
+        ? `<div class="am-name" style="color:var(--danger)">Error</div>
+           <div class="am-reason">${escapeHtml(r.error)}</div>`
+        : `<div class="am-name" style="color:var(--fg-dim)">Unknown</div>
+           <div class="am-reason">${escapeHtml(r.reason || "no confident match")}</div>`);
+  const conf = matched || r.confidence
+    ? `<span class="am-conf ${confCls}">${confPct}%</span>` : "";
+
+  row.innerHTML = `
+    <input type="checkbox" ${checked ? "checked" : ""} ${matched ? "" : "disabled"} style="pointer-events:none">
+    <img loading="lazy" src="${avatarUrl(r.groupId)}" onerror="this.style.opacity=0.2">
+    <span class="am-arrow">→</span>
+    ${suggestImg}
+    <div class="am-info">${right}</div>
+    ${conf}
+  `;
+  if (matched) row.addEventListener("click", () => amToggle(r.groupId));
+  return row;
+}
+
+function amToggle(gid) {
+  if (automatch.selected.has(gid)) automatch.selected.delete(gid);
+  else automatch.selected.add(gid);
+  renderAutoMatch();
+}
+
+function amUpdateApplyButton() {
+  const n = automatch.selected.size;
+  $("am-apply-count").textContent = n;
+  $("am-apply").disabled = n === 0;
+}
+
+function amSelectHigh() {
+  automatch.results.forEach(r => {
+    if (r.identityId && (r.confidence || 0) >= automatch.threshold) automatch.selected.add(r.groupId);
+    else automatch.selected.delete(r.groupId);
+  });
+  renderAutoMatch();
+}
+function amSelectAll() {
+  automatch.results.forEach(r => { if (r.identityId) automatch.selected.add(r.groupId); });
+  renderAutoMatch();
+}
+function amClear() {
+  automatch.selected.clear();
+  renderAutoMatch();
+}
+function closeAutoMatch() {
+  $("modal-automatch").classList.remove("show");
+}
+
+async function applyAutoMatch() {
+  const chosen = automatch.results.filter(r => automatch.selected.has(r.groupId) && r.identityId);
+  if (chosen.length === 0) return;
+
+  // Merge all clusters bound for the same identity in a single call.
+  const byTarget = new Map();
+  for (const r of chosen) {
+    if (!byTarget.has(r.identityId)) byTarget.set(r.identityId, []);
+    byTarget.get(r.identityId).push(r.groupId);
+  }
+
+  $("am-apply").disabled = true;
+  $("am-status").textContent = `Merging ${chosen.length} face(s)…`;
+  let ok = 0, fail = 0;
+  for (const [toId, fromIds] of byTarget) {
+    try {
+      await api("POST", "/api/merge", { fromGroupIds: fromIds, toGroupId: toId });
+      ok += fromIds.length;
+    } catch (e) {
+      fail += fromIds.length;
+    }
+  }
+  toast(`Merged ${ok}${fail ? `, ${fail} failed` : ""} into ${byTarget.size} identit${byTarget.size === 1 ? "y" : "ies"}`,
+        fail ? "error" : "ok");
+  closeAutoMatch();
+  bumpAvatarVersion();
+  await refreshAll();
+}
+
+// ============================================================
 // DATA LOADING
 // ============================================================
 async function refreshIdentities() {
@@ -1784,6 +2051,18 @@ function attachInfiniteScroll(gridEl, loader) {
 // WIRE UP CONTROLS
 // ============================================================
 $("btn-refresh").addEventListener("click", refreshAll);
+// Clicking the "Face Triage" title acts as a home button: leave the detail
+// view, drop any selection/armed identity, and scroll the grid back to top.
+$("home-link").addEventListener("click", () => {
+  if (state.view === "detail") backToTriage();
+  state.selected.clear();
+  state.armedIdentityId = null;
+  $("armed-info").textContent = "";
+  document.querySelector(".sidebar").classList.remove("merge-mode");
+  $("grid-triage").scrollTop = 0;
+  renderCards();
+  renderIdentities();
+});
 $("btn-load-more").addEventListener("click", loadMore);
 $("toggle-degraded").addEventListener("change", () => refreshAll());
 $("new-identity").addEventListener("click", promptNewIdentity);
@@ -1828,6 +2107,13 @@ $("ai-yes").addEventListener("click", aiYes);
 $("ai-no").addEventListener("click", aiNo);
 $("ai-stop").addEventListener("click", () => endAiMode("AI suggest stopped"));
 
+$("btn-automatch").addEventListener("click", startAutoMatch);
+$("am-cancel").addEventListener("click", closeAutoMatch);
+$("am-apply").addEventListener("click", applyAutoMatch);
+$("am-select-high").addEventListener("click", amSelectHigh);
+$("am-select-all").addEventListener("click", amSelectAll);
+$("am-clear").addEventListener("click", amClear);
+
 $("enhancer-pill").addEventListener("click", async () => {
   await pollEnhancerStatus();
   $("modal-enhancer").classList.add("show");
@@ -1852,6 +2138,11 @@ document.addEventListener("keydown", (e) => {
   }
   if ($("modal-enhancer").classList.contains("show")) {
     if (e.key === "Escape") $("modal-enhancer").classList.remove("show");
+    return;
+  }
+  if ($("modal-automatch").classList.contains("show")) {
+    if (e.key === "Escape") closeAutoMatch();
+    else if (e.key === "Enter" && !$("am-apply").disabled) applyAutoMatch();
     return;
   }
   if ($("modal-delete").classList.contains("show")) {

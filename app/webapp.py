@@ -82,6 +82,11 @@ class BestAvatarApplyBody(BaseModel):
     enhancedImageId: str = Field(min_length=1)
 
 
+class BatchSuggestBody(BaseModel):
+    """Group ids (unnamed clusters) to match against known identities in one go."""
+    groupIds: list[str] = Field(min_length=1, max_length=1000)
+
+
 def create_app(client: ProtectClient) -> FastAPI:
     app = FastAPI(title="Face Triage", docs_url="/api/docs", redoc_url=None)
     gemini = build_gemini()  # None if no GEMINI_API_KEY or SDK missing
@@ -120,6 +125,14 @@ def create_app(client: ProtectClient) -> FastAPI:
         if not index.exists():
             raise HTTPException(500, "frontend missing")
         return FileResponse(index)
+
+    @app.get("/favicon.svg", include_in_schema=False)
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon() -> FileResponse:
+        """Serve the app icon. Both paths return the same SVG — modern
+        browsers honour SVG favicons, and routing /favicon.ico here keeps
+        the logs clean of 404s from browsers that probe it by default."""
+        return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
 
     @app.get("/api/health")
     def health() -> dict:
@@ -556,6 +569,54 @@ def create_app(client: ProtectClient) -> FastAPI:
         except Exception as e:
             raise HTTPException(500, f"Gemini call failed: {type(e).__name__}: {e}")
         return result
+
+    @app.post("/api/ai/suggest-batch")
+    def ai_suggest_batch(body: BatchSuggestBody) -> dict:
+        """Match MANY unnamed groups against the known identities in one shot.
+
+        This is what powers the fast "Auto-match" flow: instead of the
+        one-card-at-a-time Y/N walk, we fetch every identity reference image
+        ONCE, then fan the per-face Gemini calls out across a thread pool so
+        the wall-clock time is roughly one call deep instead of N calls deep.
+        Returns a per-group result the UI renders as a bulk review list — the
+        user still confirms before anything merges.
+        """
+        if gemini is None:
+            raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY.")
+
+        groups = client.list_face_groups()
+        identities_raw = [g for g in groups if is_named_identity(g)]
+        if not identities_raw:
+            raise HTTPException(400, "no known identities to compare against")
+
+        # Fetch the identity lineup once (cached across the whole batch).
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            imgs = list(ex.map(lambda g: get_reference_image(g["id"]), identities_raw))
+        identities = [
+            {
+                "id": g["id"],
+                "name": g.get("name") or g.get("matchedName") or g["id"],
+                "image": img,
+            }
+            for g, img in zip(identities_raw, imgs) if img
+        ]
+        if not identities:
+            raise HTTPException(404, "could not fetch any identity reference images")
+
+        def work(gid: str) -> dict:
+            try:
+                q = get_reference_image(gid)
+                if not q:
+                    return {"groupId": gid, "error": "no query image"}
+                res = gemini.suggest(q, identities, cache_key=gid)
+                return {"groupId": gid, **res}
+            except Exception as e:
+                return {"groupId": gid, "error": f"{type(e).__name__}: {e}"}
+
+        workers = max(1, int(os.getenv("AI_BATCH_WORKERS", "6") or 6))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(work, body.groupIds))
+        return {"results": results, "identitiesConsidered": len(identities)}
 
     return app
 
