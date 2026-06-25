@@ -25,10 +25,12 @@ except Exception:
     _GENAI_AVAILABLE = False
 
 
-# gemini-2.5-flash is meaningfully better than flash-lite at face matching
-# and costs ~$0.001 per query at the image volume we send. flash-lite is
-# available via GEMINI_MODEL override for cost-sensitive setups.
-_DEFAULT_MODEL = "gemini-2.5-flash"
+# Default to the cheapest capable model. Face matching sends the query face
+# PLUS every known reference face on each call, so cost scales with how many
+# identities you have — the cheapest tier keeps bulk matching affordable.
+# Override with GEMINI_MODEL: gemini-2.5-flash (more accurate, ~3-5x pricier)
+# or a newer tier if your key has one.
+_DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
 
 class GeminiClient:

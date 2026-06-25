@@ -1790,18 +1790,32 @@ async function startAutoMatch() {
     toast("No named identities to match against yet — name a few faces first.", "error");
     return;
   }
-  const ids = state.cards.map(c => c.id);
+  let ids = state.cards.map(c => c.id);
   if (ids.length === 0) { toast("No unnamed faces to match", "error"); return; }
+
+  // Cost guard: cap the run and confirm before spending API quota. Each face
+  // is one Gemini call that also sends all your reference photos, so this can
+  // add up fast on large batches.
+  const cap = st.batchMax || 0;
+  const loaded = ids.length;
+  if (cap && ids.length > cap) ids = ids.slice(0, cap);
+  const model = st.model || "Gemini";
+  const cappedNote = ids.length < loaded
+    ? `\n\nCapped to ${ids.length} of ${loaded} loaded (raise AI_BATCH_MAX to change). Run again for the rest.`
+    : "";
+  if (!confirm(
+    `Run AI matching on ${ids.length} face${ids.length === 1 ? "" : "s"}?\n\n` +
+    `This sends up to ${ids.length} request${ids.length === 1 ? "" : "s"} to ${model} and uses your Gemini API quota. ` +
+    `Faces already matched this session are cached and won't be recharged.${cappedNote}`
+  )) return;
 
   automatch.results = [];
   automatch.selected = new Set();
+  automatch.meta = null;
   $("modal-automatch").classList.add("show");
   $("am-summary").textContent = "";
-  const moreHint = state.cards.length < state.unenrolledTotal
-    ? ` (${state.unenrolledTotal - state.cards.length} more not loaded — scroll the grid first to include them)`
-    : "";
   $("am-status").textContent =
-    `Matching ${ids.length} unnamed face${ids.length === 1 ? "" : "s"} against ${state.identities.length} identities… this can take a few seconds.${moreHint}`;
+    `Matching ${ids.length} unnamed face${ids.length === 1 ? "" : "s"} against ${state.identities.length} identities with ${model}… this can take a few seconds.`;
   $("am-list").innerHTML =
     `<div style="color:var(--fg-dim);padding:24px;text-align:center">🤖 Thinking… analysing ${ids.length} face${ids.length === 1 ? "" : "s"} in parallel</div>`;
   $("am-apply").disabled = true;
@@ -1810,6 +1824,7 @@ async function startAutoMatch() {
   try {
     const res = await api("POST", "/api/ai/suggest-batch", { groupIds: ids });
     automatch.results = res.results || [];
+    automatch.meta = { requested: res.requested, processed: res.processed, capped: res.capped };
     // Pre-select confident matches so the common case is a single click.
     automatch.results.forEach(r => {
       if (r.identityId && (r.confidence || 0) >= automatch.threshold) {
@@ -1866,9 +1881,11 @@ function renderAutoMatch() {
     errored.forEach(r => list.appendChild(amRow(r)));
   }
 
-  const total = automatch.results.length;
+  const cappedNote = automatch.meta && automatch.meta.capped
+    ? ` · capped at ${automatch.meta.processed} of ${automatch.meta.requested}` : "";
   $("am-summary").textContent =
-    `· ${matches.length} matched · ${unknown.length} unknown` + (errored.length ? ` · ${errored.length} errored` : "");
+    `· ${matches.length} matched · ${unknown.length} unknown` +
+    (errored.length ? ` · ${errored.length} errored` : "") + cappedNote;
   $("am-status").textContent = matches.length
     ? "Checked rows will be merged into the suggested identity. Click a row to toggle."
     : "No confident matches. Try “🤖 AI suggest” to step through manually, or name a few faces first.";

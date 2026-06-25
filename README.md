@@ -74,6 +74,11 @@ this view (it clears the current selection and scrolls to the top).
   common case is one click to merge dozens of faces at once. Untick any you
   disagree with first. Requires `GEMINI_API_KEY`. To match faces beyond the
   first page, scroll the grid to load more, then run it.
+  <br>**Cost note:** every face is one Gemini call that also sends all your
+  reference photos, so it asks you to confirm and caps each run at
+  `AI_BATCH_MAX` (default 50). Use the cheapest model that's accurate enough
+  (`gemini-2.5-flash-lite` by default) and remember results are cached per
+  session so re-runs don't re-charge.
 - **🤖 AI suggest** → the step-through alternative: walks unnamed cards one at
   a time, each shown with **Y** (merge) or **N** (skip). Pre-fetches the next
   card while you review the current. Requires `GEMINI_API_KEY`.
@@ -150,9 +155,10 @@ All config is read from environment variables — see
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | *(empty)* | Enables 🤖 AI suggest. Get one at https://aistudio.google.com/app/apikey |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Override the model. `gemini-2.5-flash-lite` is cheapest (~$0.0003/query) but less accurate; `gemini-2.5-pro` is best (~$0.005/query). |
+| `GEMINI_API_KEY` | *(empty)* | Enables ⚡ Auto-match + 🤖 AI suggest. Get one at https://aistudio.google.com/app/apikey |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | The model. Cost scales with how many identities you have (each call sends them all), so the cheapest tier is the default. `gemini-2.5-flash` is more accurate but ~3-5x pricier; `gemini-2.5-pro` is best/most expensive. |
 | `AI_BATCH_WORKERS` | `6` | Parallel workers for the ⚡ Auto-match batch matcher. Higher = faster, but more concurrent Gemini calls. |
+| `AI_BATCH_MAX` | `50` | Hard cap on faces sent per ⚡ Auto-match run, so one click can't fire a huge number of billable calls. `0` disables the cap. |
 
 ## How throttling works
 

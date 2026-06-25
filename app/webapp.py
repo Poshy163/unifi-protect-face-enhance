@@ -25,6 +25,17 @@ from .version import __build_date__, __version__
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _ai_batch_max() -> int:
+    """Hard cap on how many faces one ⚡ Auto-match run sends to Gemini.
+
+    Keeps a single click from quietly firing hundreds of billable calls.
+    Tunable via AI_BATCH_MAX; 0 disables the cap (use with care)."""
+    try:
+        return max(0, int(os.getenv("AI_BATCH_MAX", "50") or 50))
+    except ValueError:
+        return 50
+
+
 def is_named_identity(g: dict) -> bool:
     """A group is a 'named identity' if it has a user-given name and isn't degraded.
 
@@ -537,6 +548,10 @@ def create_app(client: ProtectClient) -> FastAPI:
         return {
             "available": gemini is not None,
             "sdk_installed": gemini_available(),
+            "model": getattr(gemini, "_model", None) if gemini is not None else None,
+            # Max faces a single Auto-match run will send to Gemini, so the UI
+            # can warn + cap before spending the user's API quota.
+            "batchMax": _ai_batch_max(),
         }
 
     @app.get("/api/ai/suggest")
@@ -590,6 +605,11 @@ def create_app(client: ProtectClient) -> FastAPI:
         if gemini is None:
             raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY.")
 
+        # Cap the run so one click can't fire hundreds of billable calls.
+        requested = len(body.groupIds)
+        cap = _ai_batch_max()
+        group_ids = body.groupIds[:cap] if cap else body.groupIds
+
         groups = client.list_face_groups()
         identities_raw = [g for g in groups if is_named_identity(g)]
         if not identities_raw:
@@ -621,8 +641,14 @@ def create_app(client: ProtectClient) -> FastAPI:
 
         workers = max(1, int(os.getenv("AI_BATCH_WORKERS", "6") or 6))
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(work, body.groupIds))
-        return {"results": results, "identitiesConsidered": len(identities)}
+            results = list(ex.map(work, group_ids))
+        return {
+            "results": results,
+            "identitiesConsidered": len(identities),
+            "requested": requested,
+            "processed": len(group_ids),
+            "capped": len(group_ids) < requested,
+        }
 
     return app
 

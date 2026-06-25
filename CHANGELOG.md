@@ -2,6 +2,22 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.3.2 — 2026-06-25
+
+- **Cost controls for AI matching.** Each face comparison sends the query face
+  plus *every* reference photo, so bulk matching can burn through a Gemini
+  budget fast. Now:
+  - Default model is **`gemini-2.5-flash-lite`** (cheapest capable tier) instead
+    of `gemini-2.5-flash`. Override with `GEMINI_MODEL`.
+  - ⚡ Auto-match **asks you to confirm** before spending quota and shows the
+    model + call count.
+  - Runs are **capped at `AI_BATCH_MAX` faces** (default 50) client- and
+    server-side, so one click can't fire hundreds of billable calls. `0`
+    disables the cap.
+  - `/api/ai/status` now reports the active `model` and `batchMax`.
+  - (No image downscaling: the reference crops are already ~360px / single-tile,
+    i.e. at Gemini's per-image token floor, so resizing wouldn't save anything.)
+
 ## 0.3.1 — 2026-06-25
 
 - **Fix: profile photos never updated in triage.** The avatar endpoint served
