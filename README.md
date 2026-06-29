@@ -72,16 +72,17 @@ this view (it clears the current selection and scrolls to the top).
   **bulk review list**: each unnamed face next to its suggested identity,
   confidence, and reason. Matches at ≥85% confidence are pre-checked, so the
   common case is one click to merge dozens of faces at once. Untick any you
-  disagree with first. Requires `GEMINI_API_KEY`. To match faces beyond the
-  first page, scroll the grid to load more, then run it.
-  <br>**Cost note:** every face is one Gemini call that also sends all your
+  disagree with first. Requires an AI backend (local or Gemini — see below).
+  To match faces beyond the first page, scroll the grid to load more, then run it.
+  <br>**Backend note:** with the **local** backend (`AI_PROVIDER=local`) this
+  is free and on-device, so the `AI_BATCH_MAX` cap and cost concerns don't
+  apply. With **Gemini**, every face is one cloud call that also sends all your
   reference photos, so it asks you to confirm and caps each run at
-  `AI_BATCH_MAX` (default 50). Use the cheapest model that's accurate enough
-  (`gemini-2.5-flash-lite` by default) and remember results are cached per
-  session so re-runs don't re-charge.
+  `AI_BATCH_MAX` (default 50). Either way results are cached per session so
+  re-runs don't recompute.
 - **🤖 AI suggest** → the step-through alternative: walks unnamed cards one at
   a time, each shown with **Y** (merge) or **N** (skip). Pre-fetches the next
-  card while you review the current. Requires `GEMINI_API_KEY`.
+  card while you review the current. Requires an AI backend (local or Gemini).
 
 ### Per-identity detail view
 
@@ -161,14 +162,63 @@ All config is read from environment variables — see
 | `PHANTOM_EVENT_LIMIT` | `1000` | Events fetched per window (Protect caps around 1000). |
 | `PHANTOM_CACHE_TTL` | `45` | Seconds to cache the harvested set. |
 
-### Gemini AI suggest (optional)
+### AI suggest (optional)
+
+The ⚡ Auto-match and 🤖 AI suggest matchers run on one of two backends, chosen
+with `AI_PROVIDER`:
+
+- **`local`** — on-device face recognition via OpenVINO + ArcFace embeddings
+  (the same embedding-and-cosine-similarity approach Frigate, CompreFace, and
+  Scrypted use). **Free, fast, private — no API key, no per-call cost.** Runs on
+  your CPU by default, or the Intel iGPU with `OPENVINO_DEVICE=GPU`. The model
+  auto-downloads on first use. Recommended.
+- **`gemini`** — Google Gemini cloud VLM. Costs per call and the bill scales
+  with how many identities you have (every call ships them all).
+- **`auto`** (default) — uses Gemini when `GEMINI_API_KEY` is set, otherwise
+  falls back to local, so existing cloud setups keep working unchanged.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | *(empty)* | Enables ⚡ Auto-match + 🤖 AI suggest. Get one at https://aistudio.google.com/app/apikey |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | The model. Cost scales with how many identities you have (each call sends them all), so the cheapest tier is the default. `gemini-2.5-flash` is more accurate but ~3-5x pricier; `gemini-2.5-pro` is best/most expensive. |
-| `AI_BATCH_WORKERS` | `6` | Parallel workers for the ⚡ Auto-match batch matcher. Higher = faster, but more concurrent Gemini calls. |
-| `AI_BATCH_MAX` | `50` | Hard cap on faces sent per ⚡ Auto-match run, so one click can't fire a huge number of billable calls. `0` disables the cap. |
+| `AI_PROVIDER` | `auto` | `local`, `gemini`, or `auto`. |
+| `AI_BATCH_WORKERS` | `6` | Parallel workers for the ⚡ Auto-match batch matcher. |
+| `AI_BATCH_MAX` | `50` | Cap on faces per ⚡ Auto-match run. Mainly protects the Gemini bill; harmless on local. `0` disables it. |
+
+**Local backend** (`AI_PROVIDER=local`):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPENVINO_DEVICE` | `CPU` | `CPU`, `GPU` (Intel iGPU), or `AUTO`. 13th-gen "H" chips have no NPU, so CPU/iGPU are the targets. `GET /api/ai/status` lists what OpenVINO detects (`availableDevices`). |
+| `LOCAL_FACE_PACK` | `buffalo_l` | Embedding model. `buffalo_l` (ResNet50, ~166 MB, most accurate) or `buffalo_s` (MobileFaceNet, ~13 MB, lighter). |
+| `LOCAL_FACE_MODEL` | *(empty)* | Path to your own ArcFace `.onnx` / OpenVINO `.xml`, bypassing the auto-download. |
+| `LOCAL_MODEL_DIR` | `~/.cache/unifi-protect-face` | Where downloaded models are cached. Mount a volume here to persist them (the bundled compose file does). |
+| `LOCAL_SIM_UNKNOWN` | `0.30` | Cosine floor — below this a face is reported as no match. Raise to cut false matches. |
+| `LOCAL_SIM_STRONG` | `0.55` | Cosine at/above which confidence maps to ~1.0 (so the UI pre-checks it). |
+
+**Using the Intel iGPU (`OPENVINO_DEVICE=GPU`).** OpenVINO supports the Iris Xe
+iGPU, but the container has to be able to reach the GPU. This works on a **Linux
+Docker host** (the same path Frigate/Scrypted use) — *not* Docker Desktop on
+Windows/macOS, whose WSL2 GPU isn't exposed as `/dev/dri`. On a Linux host:
+
+1. The published image already bundles the Intel NEO OpenCL runtime
+   (`intel-opencl-icd`). Building locally? It's on by default; `--build-arg
+   INTEL_GPU=0` skips it.
+2. Uncomment the `devices:` + `group_add:` block in
+   [docker-compose.yml](docker-compose.yml) to pass `/dev/dri` in.
+3. Set `RENDER_GID` in `.env` to your host's render group:
+   `getent group render | cut -d: -f3`.
+4. Set `OPENVINO_DEVICE=GPU`, recreate, and confirm `"GPU"` shows up in
+   `GET /api/ai/status` → `availableDevices`.
+
+This ArcFace model is small and requests are one face at a time, so on a strong
+CPU the iGPU isn't always faster per call — its real benefit is offloading the
+CPU and sustained batch throughput.
+
+**Gemini backend** (`AI_PROVIDER=gemini`, or `auto` with a key set):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GEMINI_API_KEY` | *(empty)* | Get one at https://aistudio.google.com/app/apikey |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Cheapest tier by default. `gemini-2.5-flash` is more accurate but ~3-5x pricier; `gemini-2.5-pro` is best/most expensive. |
 
 ## How throttling works
 

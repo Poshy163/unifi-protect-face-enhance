@@ -17,12 +17,18 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from . import local_client
 from .enhancer_status import STATUS
 from .gemini_client import build_from_env as build_gemini, is_available as gemini_available
 from .protect_client import BASE_PROTECT, ProtectClient
 from .version import __build_date__, __version__
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+_AI_UNCONFIGURED = (
+    "AI matching is not configured. Set AI_PROVIDER=local for on-device "
+    "OpenVINO matching, or GEMINI_API_KEY for the Gemini cloud backend."
+)
 
 
 def _ai_batch_max() -> int:
@@ -34,6 +40,29 @@ def _ai_batch_max() -> int:
         return max(0, int(os.getenv("AI_BATCH_MAX", "50") or 50))
     except ValueError:
         return 50
+
+
+def _build_ai_provider() -> tuple[Any, str]:
+    """Pick the backend for the AI suggest / best-avatar endpoints.
+
+    AI_PROVIDER selects it:
+      * ``local``  — on-device OpenVINO + ArcFace embeddings (free, private)
+      * ``gemini`` — Google Gemini cloud VLM (per-call cost)
+      * ``auto`` (default) — keeps existing cloud setups working: uses Gemini
+        when GEMINI_API_KEY is set, otherwise falls back to the local model.
+
+    Returns ``(provider_or_None, kind)``. Both backends expose the same
+    ``suggest`` / ``pick_best_avatar`` interface so callers don't branch.
+    """
+    choice = (os.getenv("AI_PROVIDER", "auto") or "auto").strip().lower()
+    if choice == "gemini":
+        return build_gemini(), "gemini"
+    if choice == "local":
+        return local_client.build_from_env(), "local"
+    # auto: prefer the already-configured cloud key for backward compatibility.
+    if os.getenv("GEMINI_API_KEY", "").strip():
+        return build_gemini(), "gemini"
+    return local_client.build_from_env(), "local"
 
 
 def is_named_identity(g: dict) -> bool:
@@ -100,9 +129,9 @@ class BatchSuggestBody(BaseModel):
 
 def create_app(client: ProtectClient) -> FastAPI:
     app = FastAPI(title="Face Triage", docs_url="/api/docs", redoc_url=None)
-    gemini = build_gemini()  # None if no GEMINI_API_KEY or SDK missing
+    ai, ai_kind = _build_ai_provider()  # None if the chosen backend is unavailable
 
-    # In-memory cache for reference identity images used by Gemini suggest.
+    # In-memory cache for reference identity images used by AI suggest.
     # Saves 14+ HTTP round-trips per suggestion after the first call.
     _ref_image_cache: dict[str, tuple[float, bytes]] = {}
     _ref_image_lock = threading.Lock()
@@ -432,8 +461,8 @@ def create_app(client: ProtectClient) -> FastAPI:
         invalidate_ref_image(group_id)
         return {"ok": True, "enhancedImageId": body.enhancedImageId}
 
-    def _gemini_pick_best(group_id: str, max_candidates: int,
-                          only_eids: list[str] | None = None) -> dict:
+    def _ai_pick_best(group_id: str, max_candidates: int,
+                      only_eids: list[str] | None = None) -> dict:
         """Internal helper. Returns {enhancedImageId, detectionId, reason,
         candidatesConsidered}. Does NOT upload — caller decides.
 
@@ -442,8 +471,8 @@ def create_app(client: ProtectClient) -> FastAPI:
         is guaranteed to be one of the displayed candidates (avoids the bug
         where AI picked an id not in the visible grid → no highlight).
         """
-        if gemini is None:
-            raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY.")
+        if ai is None:
+            raise HTTPException(503, _AI_UNCONFIGURED)
 
         all_dets: list[dict] = []
         for page in range(1, 4):
@@ -482,9 +511,9 @@ def create_app(client: ProtectClient) -> FastAPI:
             raise HTTPException(500, "could not fetch any candidate images")
 
         try:
-            choice = gemini.pick_best_avatar([img for _, img in pairs])
+            choice = ai.pick_best_avatar([img for _, img in pairs])
         except Exception as e:
-            raise HTTPException(500, f"Gemini call failed: {type(e).__name__}: {e}")
+            raise HTTPException(500, f"AI call failed: {type(e).__name__}: {e}")
 
         chosen_det, _ = pairs[choice["index"]]
         return {
@@ -506,12 +535,12 @@ def create_app(client: ProtectClient) -> FastAPI:
         """Same picker as the apply endpoint but returns the choice WITHOUT
         uploading. Lets the UI preview before the user commits."""
         only_eids = [e for e in (eids or "").split(",") if e] or None
-        return _gemini_pick_best(group_id, max_candidates, only_eids=only_eids)
+        return _ai_pick_best(group_id, max_candidates, only_eids=only_eids)
 
     @app.post("/api/identities/{group_id}/best-avatar-ai")
     def apply_best_avatar_ai(group_id: str, max_candidates: int = Query(12, ge=2, le=20)) -> dict:
         """Pick + upload in one call. Kept for back-compat / power use."""
-        choice = _gemini_pick_best(group_id, max_candidates)
+        choice = _ai_pick_best(group_id, max_candidates)
         r = client.get(f"{BASE_PROTECT}/thumbnails/enhanced/{choice['enhancedImageId']}")
         if r.status_code != 200:
             raise HTTPException(404, "could not fetch chosen image")
@@ -542,23 +571,37 @@ def create_app(client: ProtectClient) -> FastAPI:
             "to": body.groupId,
         }
 
-    # === AI suggestion (Gemini) ==========================================
+    # === AI suggestion (local OpenVINO or Gemini) ========================
     @app.get("/api/ai/status")
-    def ai_status() -> dict:
-        return {
-            "available": gemini is not None,
-            "sdk_installed": gemini_available(),
-            "model": getattr(gemini, "_model", None) if gemini is not None else None,
-            # Max faces a single Auto-match run will send to Gemini, so the UI
-            # can warn + cap before spending the user's API quota.
+    def ai_status(bench: bool = False) -> dict:
+        sdk_installed = (
+            gemini_available() if ai_kind == "gemini" else local_client.is_available()
+        )
+        out = {
+            "available": ai is not None,
+            "provider": ai_kind,
+            "sdk_installed": sdk_installed,
+            "model": getattr(ai, "_model", None) if ai is not None else None,
+            # Max faces a single Auto-match run processes, so the UI can warn +
+            # cap before spending the user's cloud quota (harmless cap locally).
             "batchMax": _ai_batch_max(),
         }
+        # ?bench=true runs a quick on-device inference benchmark (local backend
+        # only) so you can compare CPU vs GPU; result is echoed in info().
+        if bench and ai is not None and hasattr(ai, "benchmark"):
+            try:
+                ai.benchmark()
+            except Exception as e:
+                out["benchError"] = f"{type(e).__name__}: {e}"
+        if ai is not None and hasattr(ai, "info"):
+            out.update(ai.info())
+        return out
 
     @app.get("/api/ai/suggest")
     def ai_suggest(groupId: str) -> dict:
-        """Ask Gemini which known identity (if any) matches an unnamed group."""
-        if gemini is None:
-            raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY.")
+        """Suggest which known identity (if any) matches an unnamed group."""
+        if ai is None:
+            raise HTTPException(503, _AI_UNCONFIGURED)
 
         groups = client.list_face_groups()
         identities_raw = [g for g in groups if is_named_identity(g)]
@@ -586,9 +629,9 @@ def create_app(client: ProtectClient) -> FastAPI:
             raise HTTPException(404, "could not fetch query face")
 
         try:
-            result = gemini.suggest(query_image, identities, cache_key=groupId)
+            result = ai.suggest(query_image, identities, cache_key=groupId)
         except Exception as e:
-            raise HTTPException(500, f"Gemini call failed: {type(e).__name__}: {e}")
+            raise HTTPException(500, f"AI call failed: {type(e).__name__}: {e}")
         return result
 
     @app.post("/api/ai/suggest-batch")
@@ -597,13 +640,13 @@ def create_app(client: ProtectClient) -> FastAPI:
 
         This is what powers the fast "Auto-match" flow: instead of the
         one-card-at-a-time Y/N walk, we fetch every identity reference image
-        ONCE, then fan the per-face Gemini calls out across a thread pool so
+        ONCE, then fan the per-face match calls out across a thread pool so
         the wall-clock time is roughly one call deep instead of N calls deep.
         Returns a per-group result the UI renders as a bulk review list — the
         user still confirms before anything merges.
         """
-        if gemini is None:
-            raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY.")
+        if ai is None:
+            raise HTTPException(503, _AI_UNCONFIGURED)
 
         # Cap the run so one click can't fire hundreds of billable calls.
         requested = len(body.groupIds)
@@ -634,7 +677,7 @@ def create_app(client: ProtectClient) -> FastAPI:
                 q = get_reference_image(gid)
                 if not q:
                     return {"groupId": gid, "error": "no query image"}
-                res = gemini.suggest(q, identities, cache_key=gid)
+                res = ai.suggest(q, identities, cache_key=gid)
                 return {"groupId": gid, **res}
             except Exception as e:
                 return {"groupId": gid, "error": f"{type(e).__name__}: {e}"}

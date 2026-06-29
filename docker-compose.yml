@@ -10,3 +10,19 @@ services:
     ports:
       # Face Triage webapp — disable by setting WEBAPP_ENABLED=false in .env
       - "${WEBAPP_PORT:-8080}:${WEBAPP_PORT:-8080}"
+    volumes:
+      # Persist the local AI model (AI_PROVIDER=local) so it isn't re-downloaded
+      # on every container recreate. Harmless if you use the Gemini backend.
+      - face-models:/home/enhancer/.cache/unifi-protect-face
+    # --- Intel iGPU acceleration (Linux host only) --------------------------
+    # For AI_PROVIDER=local + OPENVINO_DEVICE=GPU. Uncomment to pass the iGPU
+    # into the container. Then set OPENVINO_DEVICE=GPU and RENDER_GID in .env
+    # (find it on the host: `getent group render | cut -d: -f3`). Leave commented
+    # on CPU-only hosts or Docker Desktop (Windows/macOS) — /dev/dri won't exist.
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - "${RENDER_GID:-993}"
+
+volumes:
+  face-models:

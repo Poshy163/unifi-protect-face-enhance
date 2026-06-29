@@ -2,6 +2,33 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.5.0 — 2026-06-29
+
+- **Local, on-device AI matching (no cloud, no cost).** Added a second AI
+  backend that runs face recognition locally via **OpenVINO + ArcFace
+  embeddings** — the same embedding-and-cosine-similarity approach Frigate,
+  CompreFace, and Scrypted use, and more accurate than the cloud VLM for the
+  "is this the same person?" task. Free, fast (~5-15 ms/face on CPU), and
+  private. Runs on the CPU by default or the Intel iGPU (`OPENVINO_DEVICE=GPU`).
+  - New `AI_PROVIDER` env: `local`, `gemini`, or `auto` (default — uses Gemini
+    when `GEMINI_API_KEY` is set, else local, so existing setups are unchanged).
+  - The ⚡ Auto-match and 🤖 AI suggest matchers and the 🎯 Best-avatar picker
+    all work on either backend. Best-avatar on local uses an image-quality
+    heuristic (sharpness/exposure/contrast/size) since embeddings can't rate
+    crop quality.
+  - Model auto-downloads on first use (`LOCAL_FACE_PACK`: `buffalo_l` accurate /
+    `buffalo_s` lighter); tune matching with `LOCAL_SIM_UNKNOWN` /
+    `LOCAL_SIM_STRONG`. New deps: `openvino`, `opencv-python-headless`, `numpy`.
+  - **Intel iGPU support.** Set `OPENVINO_DEVICE=GPU` to run on the Iris Xe
+    iGPU. The image bundles the Intel NEO OpenCL runtime (build with
+    `--build-arg INTEL_GPU=0` to skip); on a Linux Docker host, uncomment the
+    `/dev/dri` passthrough in `docker-compose.yml` and set `RENDER_GID`.
+  - `GET /api/ai/status` now reports the active `provider`, backend `device`,
+    `availableDevices` (so you can confirm the iGPU is detected), and model
+    readiness. `?bench=true` runs a quick on-device inference benchmark
+    (ms/face) — surfaced in the enhancer status modal via a **Benchmark AI**
+    button — so you can compare CPU vs GPU from the UI.
+
 ## 0.4.0 — 2026-06-29
 
 - **Fix: "unknown" and "degraded" faces were never enhanced.** The background

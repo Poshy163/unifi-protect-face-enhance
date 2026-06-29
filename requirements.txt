@@ -3,4 +3,9 @@ urllib3==2.2.3
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 pydantic==2.10.3
+# Cloud AI backend (optional — only used when AI_PROVIDER=gemini / auto+key).
 google-genai==0.3.0
+# Local on-device AI backend (AI_PROVIDER=local): OpenVINO ArcFace embeddings.
+openvino==2024.6.0
+numpy==1.26.4
+opencv-python-headless==4.10.0.84

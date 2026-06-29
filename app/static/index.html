@@ -909,10 +909,16 @@
         <div class="k">Face enhances processed</div><div class="v" id="es-fe-processed">—</div>
         <div class="k">RAM tasks processed</div><div class="v" id="es-ram-processed">—</div>
         <div class="k">Retroactive</div><div class="v" id="es-retro">—</div>
+        <div class="k" style="grid-column:1/-1;color:var(--fg);font-weight:600;margin-top:8px">AI matching</div>
+        <div class="k">Backend</div><div class="v" id="es-ai-backend">—</div>
+        <div class="k">Device</div><div class="v" id="es-ai-device">—</div>
+        <div class="k">Available</div><div class="v" id="es-ai-devices">—</div>
+        <div class="k">Speed</div><div class="v" id="es-ai-bench">—</div>
       </div>
       <div id="es-error" style="color:var(--danger);font-size:13px;margin-top:8px;display:none"></div>
       <div class="actions">
         <button id="enhancer-close">Close</button>
+        <button id="ai-bench-run" title="Embed a test image and report ms/face on the active device">Benchmark AI</button>
         <button id="enhancer-run-now" class="primary">Run now</button>
       </div>
     </div>
@@ -1653,7 +1659,7 @@ async function startAiMode() {
   try { st = await api("GET", "/api/ai/status"); }
   catch (e) { toast(`AI status check failed: ${e.message}`, "error"); return; }
   if (!st.available) {
-    toast("Gemini not configured. Set GEMINI_API_KEY env var.", "error");
+    toast("AI matching not configured. Set AI_PROVIDER=local or GEMINI_API_KEY.", "error");
     return;
   }
   if (state.cards.length === 0) {
@@ -1783,7 +1789,7 @@ async function startAutoMatch() {
   try { st = await api("GET", "/api/ai/status"); }
   catch (e) { toast(`AI status check failed: ${e.message}`, "error"); return; }
   if (!st.available) {
-    toast("Gemini not configured. Set GEMINI_API_KEY env var.", "error");
+    toast("AI matching not configured. Set AI_PROVIDER=local or GEMINI_API_KEY.", "error");
     return;
   }
   if (state.identities.length === 0) {
@@ -2133,11 +2139,41 @@ $("am-select-high").addEventListener("click", amSelectHigh);
 $("am-select-all").addEventListener("click", amSelectAll);
 $("am-clear").addEventListener("click", amClear);
 
+async function renderAiBackend(opts = {}) {
+  let st;
+  try { st = await api("GET", "/api/ai/status" + (opts.bench ? "?bench=true" : "")); }
+  catch { $("es-ai-backend").textContent = "unavailable"; return; }
+  $("es-ai-backend").textContent = st.available
+    ? (st.provider || "—") + (st.model ? ` (${st.model})` : "")
+    : "not configured";
+  $("es-ai-device").textContent = st.device || (st.provider === "gemini" ? "cloud" : "—");
+  $("es-ai-devices").textContent = (st.availableDevices && st.availableDevices.length)
+    ? st.availableDevices.join(", ") : "—";
+  if (st.benchError) {
+    $("es-ai-bench").textContent = "bench failed: " + st.benchError;
+  } else if (st.bench) {
+    $("es-ai-bench").textContent =
+      `${st.bench.msPerFace} ms/face (${st.bench.facesPerSec}/s) on ${st.bench.device}`;
+  } else {
+    $("es-ai-bench").textContent = st.provider === "local"
+      ? "— (click Benchmark AI)" : "—";
+  }
+}
+
 $("enhancer-pill").addEventListener("click", async () => {
   await pollEnhancerStatus();
+  renderAiBackend();
   $("modal-enhancer").classList.add("show");
 });
 $("enhancer-close").addEventListener("click", () => $("modal-enhancer").classList.remove("show"));
+$("ai-bench-run").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = "Benchmarking…";
+  $("es-ai-bench").textContent = "running…";
+  try { await renderAiBackend({ bench: true }); }
+  finally { btn.disabled = false; btn.textContent = orig; }
+});
 $("enhancer-run-now").addEventListener("click", async () => {
   try {
     await api("POST", "/api/enhancer/run-now");
