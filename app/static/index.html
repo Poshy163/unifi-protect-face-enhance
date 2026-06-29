@@ -715,7 +715,7 @@
             <span>Show low-quality</span>
           </label>
           <button id="btn-automatch" class="primary" title="Match the loaded unnamed faces against your identities all at once, then approve the matches in bulk. Scroll to load more first to match more.">⚡ Auto-match</button>
-          <button id="btn-ai-suggest" title="Step through unnamed faces one at a time with Gemini suggestions">🤖 AI suggest</button>
+          <button id="btn-ai-suggest" title="Step through unnamed faces one at a time with AI suggestions">🤖 AI suggest</button>
           <button id="btn-delete" class="danger" disabled>Delete</button>
           <span class="info">drag onto identity · click to merge ·
             <span class="kbd">1</span>–<span class="kbd">9</span> ·
@@ -829,7 +829,7 @@
       <div id="ai-pick-reason" style="display:none;margin:8px 0 0;padding:8px 12px;background:var(--ok-soft);border:1px solid var(--ok);border-radius:var(--radius-sm);font-size:12px;color:#a7f3d0"></div>
       <div class="actions" style="margin-top:14px">
         <button id="best-avatar-cancel">Cancel</button>
-        <button id="best-avatar-ai" title="Let Gemini pick the clearest, most frontal photo">🤖 Let AI pick</button>
+        <button id="best-avatar-ai" title="Let the AI pick the clearest, most frontal photo">🤖 Let AI pick</button>
       </div>
     </div>
   </div>
@@ -847,7 +847,7 @@
         <div style="font-size:24px;color:var(--fg-dim)">→</div>
         <div style="text-align:center">
           <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">AI suggests</div>
-          <img id="ai-suggest-img" style="width:140px;height:140px;object-fit:cover;border-radius:8px;background:var(--bg-3)">
+          <img id="ai-suggest-img" onerror="this.style.display='none'" style="width:140px;height:140px;object-fit:cover;border-radius:8px;background:var(--bg-3)">
           <div style="margin-top:6px"><span id="ai-suggest-name" style="font-weight:600">—</span></div>
           <div><span id="ai-suggest-conf" style="font-size:11px;color:var(--fg-dim)">—</span></div>
         </div>
@@ -870,9 +870,12 @@
       <p id="am-status">Matching unnamed faces against your identities…</p>
       <div id="am-list" style="max-height:54vh;overflow-y:auto;display:flex;flex-direction:column;gap:5px;margin:4px 0"></div>
       <div class="actions" style="justify-content:space-between;margin-top:14px">
-        <div style="display:flex;gap:8px">
+        <div style="display:flex;gap:8px;align-items:center">
+          <label title="Only show matches at or above this confidence" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--fg-dim)">Show ≥
+            <input id="am-review-min" type="number" min="0" max="100" step="5" value="50" style="width:54px">%
+          </label>
           <button id="am-select-high" title="Select every match at or above the confidence threshold">Select ≥85%</button>
-          <button id="am-select-all" title="Select all matches">All</button>
+          <button id="am-select-all" title="Select all shown matches">All</button>
           <button id="am-clear">Clear</button>
         </div>
         <div style="display:flex;gap:8px">
@@ -1708,12 +1711,13 @@ async function stepAi() {
   const groupId = ai.queue.shift();
   ai.current = groupId;
   $("ai-query-img").src = avatarUrl(groupId);
-  $("ai-suggest-img").src = "";
+  $("ai-suggest-img").removeAttribute("src");
+  $("ai-suggest-img").style.display = "none";
   $("ai-suggest-name").textContent = "…thinking";
   $("ai-suggest-name").style.color = "";
   $("ai-suggest-conf").textContent = "";
   $("ai-reason").textContent = "";
-  $("ai-status").textContent = "Asking Gemini…";
+  $("ai-status").textContent = "Matching…";
   $("ai-yes").disabled = true;
 
   // Use a pre-fetched result if we already kicked one off for this id.
@@ -1739,7 +1743,8 @@ async function stepAi() {
 
   if (!suggest.identityId) {
     $("ai-status").textContent = "No confident match";
-    $("ai-suggest-img").src = "";
+    $("ai-suggest-img").removeAttribute("src");
+    $("ai-suggest-img").style.display = "none";
     $("ai-suggest-name").textContent = "Unknown";
     $("ai-suggest-name").style.color = "var(--fg-dim)";
     $("ai-suggest-conf").textContent = `confidence ${Math.round((suggest.confidence||0)*100)}%`;
@@ -1747,6 +1752,7 @@ async function stepAi() {
     $("ai-yes").disabled = true;
   } else {
     $("ai-status").textContent = "Press Y to merge, N to skip";
+    $("ai-suggest-img").style.display = "";
     $("ai-suggest-img").src = avatarUrl(suggest.identityId);
     $("ai-suggest-name").textContent = suggest.name;
     $("ai-suggest-name").style.color = suggest.confidence >= 0.85 ? "var(--ok)" : "var(--warn)";
@@ -1782,7 +1788,7 @@ function aiNo() {
 // ============================================================
 // AUTO-MATCH — classify ALL unnamed cards at once, review in bulk
 // ============================================================
-const automatch = { results: [], selected: new Set(), threshold: 0.85 };
+const automatch = { results: [], selected: new Set(), threshold: 0.85, reviewMin: 0.5 };
 
 async function startAutoMatch() {
   let st;
@@ -1799,20 +1805,22 @@ async function startAutoMatch() {
   let ids = state.cards.map(c => c.id);
   if (ids.length === 0) { toast("No unnamed faces to match", "error"); return; }
 
-  // Cost guard: cap the run and confirm before spending API quota. Each face
-  // is one Gemini call that also sends all your reference photos, so this can
-  // add up fast on large batches.
+  // Confirm before a big run. For Gemini each face is a billable call (plus all
+  // reference photos), so warn about quota; the local backend is free.
+  const local = (st.provider || (st.model ? "local" : "gemini")) !== "gemini";
+  const model = st.model || (local ? "local model" : "Gemini");
   const cap = st.batchMax || 0;
   const loaded = ids.length;
   if (cap && ids.length > cap) ids = ids.slice(0, cap);
-  const model = st.model || "Gemini";
   const cappedNote = ids.length < loaded
     ? `\n\nCapped to ${ids.length} of ${loaded} loaded (raise AI_BATCH_MAX to change). Run again for the rest.`
     : "";
+  const costNote = local
+    ? `This runs locally on ${model} — free, no API cost.`
+    : `This sends up to ${ids.length} request${ids.length === 1 ? "" : "s"} to ${model} and uses your Gemini API quota.`;
   if (!confirm(
     `Run AI matching on ${ids.length} face${ids.length === 1 ? "" : "s"}?\n\n` +
-    `This sends up to ${ids.length} request${ids.length === 1 ? "" : "s"} to ${model} and uses your Gemini API quota. ` +
-    `Faces already matched this session are cached and won't be recharged.${cappedNote}`
+    `${costNote} Faces already matched this session are cached.${cappedNote}`
   )) return;
 
   automatch.results = [];
@@ -1851,32 +1859,32 @@ function amIdentityName(identityId, fallback) {
 }
 
 function renderAutoMatch() {
-  const matches = automatch.results.filter(r => r.identityId)
+  const reviewMin = automatch.reviewMin || 0;
+  const minPct = Math.round(reviewMin * 100);
+  const allMatches = automatch.results.filter(r => r.identityId)
     .sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+  // Only surface matches at/above the review threshold — the rest are noise.
+  const matches = allMatches.filter(r => (r.confidence || 0) >= reviewMin);
+  const hiddenLow = allMatches.length - matches.length;
   const unknown = automatch.results.filter(r => !r.identityId && !r.error);
   const errored = automatch.results.filter(r => r.error);
 
   const list = $("am-list");
   list.innerHTML = "";
 
-  if (matches.length === 0 && unknown.length === 0 && errored.length === 0) {
-    list.innerHTML = `<div class="empty">No results.</div>`;
-  }
-
   if (matches.length) {
     const lbl = document.createElement("div");
     lbl.className = "am-section-label";
-    lbl.textContent = `Suggested matches (${matches.length})`;
+    lbl.textContent = `Suggested matches ≥ ${minPct}% (${matches.length})`;
     list.appendChild(lbl);
     matches.forEach(r => list.appendChild(amRow(r)));
-  }
-
-  if (unknown.length) {
-    const lbl = document.createElement("div");
-    lbl.className = "am-section-label";
-    lbl.textContent = `No confident match (${unknown.length})`;
-    list.appendChild(lbl);
-    unknown.forEach(r => list.appendChild(amRow(r)));
+  } else {
+    const none = document.createElement("div");
+    none.style.cssText = "color:var(--fg-dim);padding:20px;text-align:center";
+    none.textContent = allMatches.length
+      ? `No matches at or above ${minPct}% — lower “Show ≥ %” to see ${allMatches.length} weaker one${allMatches.length === 1 ? "" : "s"}.`
+      : "No confident matches. Try “🤖 AI suggest” to step through manually, or name a few faces first.";
+    list.appendChild(none);
   }
 
   if (errored.length) {
@@ -1887,14 +1895,24 @@ function renderAutoMatch() {
     errored.forEach(r => list.appendChild(amRow(r)));
   }
 
+  const hiddenBits = [];
+  if (hiddenLow) hiddenBits.push(`${hiddenLow} below ${minPct}%`);
+  if (unknown.length) hiddenBits.push(`${unknown.length} no-match`);
+  if (hiddenBits.length) {
+    const note = document.createElement("div");
+    note.style.cssText = "color:var(--fg-faint);font-size:12px;padding:8px 2px";
+    note.textContent = `Hidden: ${hiddenBits.join(" · ")}. Lower “Show ≥ %” to review them.`;
+    list.appendChild(note);
+  }
+
   const cappedNote = automatch.meta && automatch.meta.capped
     ? ` · capped at ${automatch.meta.processed} of ${automatch.meta.requested}` : "";
   $("am-summary").textContent =
-    `· ${matches.length} matched · ${unknown.length} unknown` +
+    `· ${matches.length} shown · ${hiddenLow} low · ${unknown.length} unknown` +
     (errored.length ? ` · ${errored.length} errored` : "") + cappedNote;
   $("am-status").textContent = matches.length
     ? "Checked rows will be merged into the suggested identity. Click a row to toggle."
-    : "No confident matches. Try “🤖 AI suggest” to step through manually, or name a few faces first.";
+    : "Adjust “Show ≥ %”, try “🤖 AI suggest”, or name a few faces first.";
   amUpdateApplyButton();
 }
 
@@ -1953,7 +1971,11 @@ function amSelectHigh() {
   renderAutoMatch();
 }
 function amSelectAll() {
-  automatch.results.forEach(r => { if (r.identityId) automatch.selected.add(r.groupId); });
+  // Only the shown matches (≥ review threshold), so it matches what's visible.
+  const reviewMin = automatch.reviewMin || 0;
+  automatch.results.forEach(r => {
+    if (r.identityId && (r.confidence || 0) >= reviewMin) automatch.selected.add(r.groupId);
+  });
   renderAutoMatch();
 }
 function amClear() {
@@ -2138,6 +2160,18 @@ $("am-apply").addEventListener("click", applyAutoMatch);
 $("am-select-high").addEventListener("click", amSelectHigh);
 $("am-select-all").addEventListener("click", amSelectAll);
 $("am-clear").addEventListener("click", amClear);
+$("am-review-min").addEventListener("change", (e) => {
+  let v = parseInt(e.target.value, 10);
+  if (isNaN(v)) v = 50;
+  v = Math.max(0, Math.min(100, v));
+  e.target.value = v;
+  automatch.reviewMin = v / 100;
+  // Drop selections now hidden below the threshold (what you see is what merges).
+  automatch.results.forEach(r => {
+    if (r.identityId && (r.confidence || 0) < automatch.reviewMin) automatch.selected.delete(r.groupId);
+  });
+  renderAutoMatch();
+});
 
 async function renderAiBackend(opts = {}) {
   let st;

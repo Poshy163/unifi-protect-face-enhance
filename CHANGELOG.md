@@ -16,7 +16,16 @@ Versioning starts here. Older changes are summarized in the initial entry.
   well above non-matches, so `LOCAL_SIM_UNKNOWN` now defaults to **0.40** (was
   0.30) — weak best-guesses (e.g. cosine 0.31) now correctly read as "no
   confident match" instead of a misleading low-confidence suggestion.
-- The AI-suggest panel label is now backend-neutral ("AI suggests").
+- **Auto-match confidence filter.** ⚡ Auto-match still matches every loaded
+  face, but a new "Show ≥ %" control (default 50%) limits the review list to
+  matches at/above that confidence — so you only confirm the ones worth a look,
+  with the weaker/no-match results collapsed into a hidden-count note. "Select
+  all" and merge act only on what's shown.
+- UI polish for the local backend: the AI-suggest panel is backend-neutral
+  ("AI suggests" / "Matching…" instead of "Asking Gemini…"), no longer shows a
+  broken-image placeholder while thinking or on no-match, and the Auto-match
+  confirm dialog drops the "Gemini API quota" warning when running locally
+  (it's free).
 
 ## 0.6.0 — 2026-06-29
 
