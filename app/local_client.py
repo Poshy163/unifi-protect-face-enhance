@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 import threading
 import time
 import urllib.request
@@ -67,11 +68,34 @@ _PACKS: dict[str, tuple[str, str]] = {
 _DEFAULT_PACK = "buffalo_l"
 
 
+def _writable_dir(path: Path) -> Path:
+    """Return `path` if it can be created and written, else a temp-dir fallback.
+
+    Guards against a model volume that's mounted root-owned while we run as a
+    non-root user — without this the first download raises PermissionError and
+    the AI call 500s. The fallback works but isn't persistent (re-downloads on
+    restart), so the real fix is fixing the mount's ownership."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write-test"
+        probe.touch()
+        probe.unlink()
+        return path
+    except Exception:
+        fallback = Path(tempfile.gettempdir()) / "unifi-protect-face"
+        fallback.mkdir(parents=True, exist_ok=True)
+        print(
+            f"[local_client] WARNING: {path} not writable — caching models in "
+            f"{fallback} instead (not persistent; fix the volume ownership).",
+            flush=True,
+        )
+        return fallback
+
+
 def _model_dir() -> Path:
     d = os.getenv("LOCAL_MODEL_DIR", "").strip()
-    if d:
-        return Path(d)
-    return Path.home() / ".cache" / "unifi-protect-face"
+    base = Path(d) if d else (Path.home() / ".cache" / "unifi-protect-face")
+    return _writable_dir(base)
 
 
 def _ensure_model() -> str:

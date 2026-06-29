@@ -30,13 +30,18 @@ RUN pip install -r requirements.txt
 
 COPY app ./app
 
-RUN useradd --create-home --uid 1000 enhancer \
- && chown -R enhancer:enhancer /app
-USER enhancer
-
 # Local AI models download here on first use (AI_PROVIDER=local). Mount a
 # volume at this path to persist them across container recreates.
 ENV LOCAL_MODEL_DIR=/home/enhancer/.cache/unifi-protect-face
+
+# Create the model dir owned by the runtime user BEFORE the volume mounts, so an
+# empty named volume inherits enhancer ownership (Docker copies the dir's owner
+# to the fresh volume) — otherwise the volume is root-owned and uid 1000 can't
+# write to it.
+RUN useradd --create-home --uid 1000 enhancer \
+ && mkdir -p "$LOCAL_MODEL_DIR" \
+ && chown -R enhancer:enhancer /app /home/enhancer/.cache
+USER enhancer
 
 EXPOSE 8080
 
