@@ -185,13 +185,20 @@ with `AI_PROVIDER`:
 
 **Local backend** (`AI_PROVIDER=local`):
 
+Matching runs a proper face pipeline: a **YuNet** detector finds the face and
+its 5 landmarks, the crop is **aligned** to ArcFace's canonical layout, then the
+recognition model embeds it and matches by cosine similarity. Alignment matters
+a lot — ArcFace is trained on aligned faces, so skipping it badly hurts accuracy.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OPENVINO_DEVICE` | `CPU` | `CPU`, `GPU` (Intel iGPU), or `AUTO`. 13th-gen "H" chips have no NPU, so CPU/iGPU are the targets. `GET /api/ai/status` lists what OpenVINO detects (`availableDevices`). |
-| `LOCAL_FACE_PACK` | `buffalo_l` | Embedding model. `buffalo_l` (ResNet50, ~166 MB, most accurate) or `buffalo_s` (MobileFaceNet, ~13 MB, lighter). |
-| `LOCAL_FACE_MODEL` | *(empty)* | Path to your own ArcFace `.onnx` / OpenVINO `.xml`, bypassing the auto-download. |
+| `LOCAL_FACE_PACK` | `buffalo_l` | Recognition model, weakest→strongest: `buffalo_s` (MobileFaceNet, ~13 MB), `buffalo_l` (ResNet50, ~166 MB), `antelopev2` (ResNet100/Glint360K, ~260 MB, most accurate, ~2× slower). |
+| `LOCAL_ALIGN` | `true` | Detect + align faces before embedding. Leave on — it's the single biggest accuracy lever. |
+| `LOCAL_DETECT_SCORE` | `0.5` | YuNet detector confidence floor (lower detects more faces). |
+| `LOCAL_FACE_MODEL` / `LOCAL_DETECT_MODEL` | *(empty)* | Paths to your own recognition / detector models, bypassing auto-download. |
 | `LOCAL_MODEL_DIR` | `~/.cache/unifi-protect-face` | Where downloaded models are cached. Mount a volume here to persist them (the bundled compose file does). |
-| `LOCAL_SIM_UNKNOWN` | `0.30` | Cosine floor — below this a face is reported as no match. Raise to cut false matches. |
+| `LOCAL_SIM_UNKNOWN` | `0.30` | Cosine floor — below this a face is reported as no match. Raise to cut false matches (with alignment on, ~0.4 is usually safe). |
 | `LOCAL_SIM_STRONG` | `0.55` | Cosine at/above which confidence maps to ~1.0 (so the UI pre-checks it). |
 
 **Using the Intel iGPU (`OPENVINO_DEVICE=GPU`).** OpenVINO supports the Iris Xe

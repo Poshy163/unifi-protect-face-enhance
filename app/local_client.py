@@ -19,9 +19,15 @@ can use either backend interchangeably:
   * ``pick_best_avatar(candidate_images)``
         -> ``{"index", "reason"}``
 
-Matching uses an embedding model. The "best avatar" pick is a pure image-quality
-heuristic (sharpness + exposure + contrast + size) — embeddings can't rate crop
-quality, and this needs no extra model.
+Matching pipeline (per face crop): a face detector (YuNet) finds the face and
+its 5 landmarks, the crop is warped to ArcFace's canonical 112x112 layout, then
+the recognition model embeds it. The alignment step is critical — ArcFace is
+trained on landmark-aligned faces, so feeding raw, unaligned crops badly hurts
+accuracy (this is the step Frigate / CompreFace / Scrypted also do). If no face
+is detected in a crop, it falls back to a plain resize.
+
+The "best avatar" pick is a pure image-quality heuristic (sharpness + exposure +
+contrast + size) — embeddings can't rate crop quality, and this needs no model.
 """
 from __future__ import annotations
 
@@ -50,22 +56,46 @@ except Exception:  # pragma: no cover - import guard
     _OV_AVAILABLE = False
 
 
-# InsightFace model packs published on the project's GitHub releases. Each zip
-# bundles a detector + an ArcFace recognition .onnx; we only need the latter and
-# OpenVINO reads .onnx natively (no conversion step). buffalo_l is the accurate
-# default (ResNet50, ~166 MB); buffalo_s is a lighter MobileFaceNet (~13 MB).
+# InsightFace recognition packs published on GitHub releases. Each zip bundles a
+# detector + an ArcFace recognition .onnx; we only need the recognition model
+# (OpenVINO reads .onnx natively). Ordered weakest→strongest:
+#   buffalo_s  — MobileFaceNet (~13 MB), fastest, least accurate
+#   buffalo_l  — ResNet50 / WebFace600K (~166 MB), strong default
+#   antelopev2 — ResNet100 / Glint360K (~260 MB), most accurate, ~2x slower
 _PACKS: dict[str, tuple[str, str]] = {
-    "buffalo_l": (
-        "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
-        "w600k_r50.onnx",
-    ),
     "buffalo_s": (
         "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip",
         "w600k_mbf.onnx",
     ),
+    "buffalo_l": (
+        "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+        "w600k_r50.onnx",
+    ),
+    "antelopev2": (
+        "https://github.com/deepinsight/insightface/releases/download/v0.7/antelopev2.zip",
+        "glintr100.onnx",
+    ),
 }
 
 _DEFAULT_PACK = "buffalo_l"
+
+# YuNet face detector (OpenCV Zoo) — gives a bbox + 5 landmarks per face, with no
+# manual decoding (cv2.FaceDetectorYN does it). Tiny (~350 KB). The github.com
+# /raw/ host resolves git-lfs to the real binary (raw.githubusercontent.com would
+# return an LFS pointer), so we use it and size-check the result.
+_YUNET_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/"
+    "face_detection_yunet/face_detection_yunet_2023mar.onnx"
+)
+_YUNET_FILE = "face_detection_yunet_2023mar.onnx"
+
+# Canonical 5-point destination for ArcFace alignment on a 112x112 crop
+# (left eye, right eye, nose, left mouth, right mouth, in image coords). YuNet's
+# landmark order lines up with this directly.
+_ARCFACE_DST = [
+    (38.2946, 51.6963), (73.5318, 51.5014), (56.0252, 71.7366),
+    (41.5493, 92.3655), (70.7299, 92.2041),
+]
 
 
 def _writable_dir(path: Path) -> Path:
@@ -140,11 +170,45 @@ def _ensure_model() -> str:
     return str(onnx_path)
 
 
+def _ensure_detector_model() -> str:
+    """Return a path to the YuNet detector .onnx, downloading it on first use.
+    Override with LOCAL_DETECT_MODEL."""
+    explicit = os.getenv("LOCAL_DETECT_MODEL", "").strip()
+    if explicit:
+        if not Path(explicit).exists():
+            raise FileNotFoundError(f"LOCAL_DETECT_MODEL not found: {explicit}")
+        return explicit
+
+    dest = _model_dir() / "detector" / _YUNET_FILE
+    if dest.exists() and dest.stat().st_size > 10_000:
+        return str(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    urllib.request.urlretrieve(_YUNET_URL, dest)  # noqa: S310 - pinned URL
+    # A git-lfs pointer or error page would be tiny; a real model is ~350 KB.
+    if dest.stat().st_size < 10_000:
+        size = dest.stat().st_size
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"downloaded detector looks wrong ({size} bytes) — set LOCAL_DETECT_MODEL"
+        )
+    return str(dest)
+
+
 def _envf(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, "") or default)
     except ValueError:
         return default
+
+
+def _envb(name: str, default: bool) -> bool:
+    v = os.getenv(name, "").strip().lower()
+    if not v:
+        return default
+    return v in ("1", "true", "yes", "on")
 
 
 class LocalClient:
@@ -167,6 +231,16 @@ class LocalClient:
         self._load_lock = threading.Lock()
         self._load_error: str | None = None
         self._bench: dict[str, Any] | None = None  # last benchmark result
+
+        # Face detection + alignment (critical for ArcFace accuracy). Loaded
+        # lazily too; if it fails it self-disables and matching falls back to a
+        # plain resize (lower accuracy) rather than erroring.
+        self._align = _envb("LOCAL_ALIGN", True)
+        self._detect_score = _envf("LOCAL_DETECT_SCORE", 0.5)
+        self._detector = None
+        self._det_lock = threading.Lock()      # guards lazy load
+        self._det_run_lock = threading.Lock()  # serialises detect() (stateful)
+        self._detector_error: str | None = None
 
         # Caches. Embeddings are keyed by image content hash (so each reference
         # face is embedded once across a whole batch). Results mirror the Gemini
@@ -197,6 +271,9 @@ class LocalClient:
             "ready": self._compiled is not None,
             "loadError": self._load_error,
             "bench": self._bench,
+            "align": self._align,
+            "detectorReady": self._detector is not None,
+            "detectorError": self._detector_error,
         }
 
     # --- inference -------------------------------------------------------
@@ -223,16 +300,72 @@ class LocalClient:
                 self._load_error = f"{type(e).__name__}: {e}"
                 raise
 
+    def _ensure_detector(self) -> None:
+        if self._detector is not None or not self._align:
+            return
+        with self._det_lock:
+            if self._detector is not None or not self._align:
+                return
+            try:
+                path = _ensure_detector_model()
+                self._detector = cv2.FaceDetectorYN.create(
+                    path, "", (320, 320), self._detect_score, 0.3, 5000
+                )
+            except Exception as e:
+                self._detector_error = f"{type(e).__name__}: {e}"
+                self._align = False  # degrade to resize; stop retrying
+                print(
+                    f"[local_client] WARNING: face detector unavailable "
+                    f"({self._detector_error}); matching WITHOUT alignment "
+                    f"(lower accuracy). Set LOCAL_DETECT_MODEL or LOCAL_ALIGN=false.",
+                    flush=True,
+                )
+
+    def _to_blob(self, img_bgr: "np.ndarray") -> "np.ndarray":
+        """112x112 (or model in_size) BGR -> normalised NCHW blob for ArcFace."""
+        if (img_bgr.shape[1], img_bgr.shape[0]) != self._in_size:
+            img_bgr = cv2.resize(img_bgr, self._in_size, interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
+        rgb = (rgb - 127.5) / 127.5  # ArcFace mean/std
+        return np.ascontiguousarray(rgb.transpose(2, 0, 1)[None])
+
     def _prep(self, jpeg: bytes) -> "np.ndarray":
+        """Fallback path: resize the whole crop (no alignment)."""
         arr = np.frombuffer(jpeg, np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # BGR
         if img is None:
             raise ValueError("could not decode image")
-        img = cv2.resize(img, self._in_size, interpolation=cv2.INTER_LINEAR)
-        # ArcFace expects RGB, mean/std 127.5, NCHW.
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32)
-        img = (img - 127.5) / 127.5
-        return np.ascontiguousarray(img.transpose(2, 0, 1)[None])
+        return self._to_blob(img)
+
+    def _prep_aligned(self, jpeg: bytes) -> "np.ndarray | None":
+        """Detect the face, warp its 5 landmarks to ArcFace's canonical layout,
+        and return the blob. None if no face is found (caller falls back)."""
+        self._ensure_detector()
+        if self._detector is None:
+            return None
+        arr = np.frombuffer(jpeg, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # BGR
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        try:
+            # setInputSize + detect is stateful — one detector, serialise access.
+            with self._det_run_lock:
+                self._detector.setInputSize((w, h))
+                _, faces = self._detector.detect(img)
+        except Exception:
+            return None
+        if faces is None or len(faces) == 0:
+            return None
+        # Largest detected face (the subject of a Protect crop).
+        face = max(faces, key=lambda r: float(r[2]) * float(r[3]))
+        lmk = np.array(face[4:14], dtype=np.float32).reshape(5, 2)
+        dst = np.array(_ARCFACE_DST, dtype=np.float32)
+        M, _ = cv2.estimateAffinePartial2D(lmk, dst, method=cv2.LMEDS)
+        if M is None:
+            return None
+        aligned = cv2.warpAffine(img, M, (112, 112), borderValue=0)
+        return self._to_blob(aligned)
 
     def _infer(self, blob: "np.ndarray") -> "np.ndarray":
         # A fresh infer request per call so the threaded batch matcher
@@ -251,7 +384,10 @@ class LocalClient:
         if hit is not None:
             return hit
         self._ensure_loaded()
-        emb = self._infer(self._prep(jpeg))
+        blob = self._prep_aligned(jpeg) if self._align else None
+        if blob is None:
+            blob = self._prep(jpeg)  # no face detected → resize fallback
+        emb = self._infer(blob)
         with self._cache_lock:
             self._emb_cache[key] = emb
         return emb

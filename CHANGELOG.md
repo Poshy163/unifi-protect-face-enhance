@@ -2,6 +2,21 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.6.0 — 2026-06-29
+
+- **Local matching accuracy: face detection + alignment.** The local backend
+  was embedding raw Protect crops, but ArcFace is trained on landmark-aligned
+  faces — feeding it unaligned crops badly hurt match accuracy. Each crop now
+  goes through a **YuNet** detector (auto-downloaded, ~350 KB) → 5-point
+  **alignment** to ArcFace's canonical 112×112 layout → embedding, the same
+  pipeline Frigate/CompreFace/Scrypted use. Falls back to a plain resize if no
+  face is detected, and self-disables (with a warning) if the detector can't
+  load. Toggle with `LOCAL_ALIGN`; tune with `LOCAL_DETECT_SCORE`.
+- **Stronger recognition model option.** `LOCAL_FACE_PACK` now also accepts
+  `antelopev2` (ResNet100 / Glint360K) — the most accurate pack, ~2× slower than
+  the `buffalo_l` default. `buffalo_s` remains the light option.
+- `GET /api/ai/status` reports `align` / `detectorReady` / `detectorError`.
+
 ## 0.5.0 — 2026-06-29
 
 - **Local, on-device AI matching (no cloud, no cost).** Added a second AI
