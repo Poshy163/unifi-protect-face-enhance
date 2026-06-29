@@ -8,20 +8,23 @@ WORKDIR /app
 
 # Runtime libs for opencv-python-headless / openvino (local AI backend).
 # INTEL_GPU=1 (default) also installs the Intel NEO OpenCL runtime so OpenVINO
-# can target the Intel iGPU (AI_PROVIDER=local + OPENVINO_DEVICE=GPU). The
-# intel-opencl-icd package lives in Debian's non-free area, so we enable it
-# first. The whole GPU step is best-effort: if it can't install, the image still
-# builds and works on CPU (check /api/ai/status -> availableDevices). Build with
-# --build-arg INTEL_GPU=0 to skip it entirely (smaller CPU/Gemini-only image).
+# can target the Intel iGPU (AI_PROVIDER=local + OPENVINO_DEVICE=GPU):
+#   * ocl-icd-libopencl1 — the OpenCL ICD loader (provides libOpenCL.so.1, which
+#     the OpenVINO GPU plugin links against).
+#   * intel-opencl-icd   — Intel's OpenCL driver; lives in Debian's non-free
+#     area, so we enable contrib/non-free first (deb822 sources, trixie+).
+# Intel GPUs are x86 only, so this is skipped on non-amd64 builds. The install is
+# intentionally fatal on amd64: a missing runtime should fail the build loudly,
+# not silently ship a GPU image that can't load the plugin at runtime.
+# Build with --build-arg INTEL_GPU=0 to skip it (smaller CPU/Gemini-only image).
 ARG INTEL_GPU=1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libglib2.0-0 libgomp1 \
- && if [ "$INTEL_GPU" = "1" ]; then \
-        ( sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' \
-              /etc/apt/sources.list.d/debian.sources \
-          && apt-get update \
-          && apt-get install -y --no-install-recommends intel-opencl-icd ) \
-        || echo "WARNING: intel-opencl-icd unavailable; OPENVINO_DEVICE=GPU won't work, CPU still does"; \
+ && if [ "$INTEL_GPU" = "1" ] && [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' \
+            /etc/apt/sources.list.d/debian.sources \
+     && apt-get update \
+     && apt-get install -y --no-install-recommends ocl-icd-libopencl1 intel-opencl-icd; \
     fi \
  && rm -rf /var/lib/apt/lists/*
 
