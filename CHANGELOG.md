@@ -2,6 +2,22 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.7.0 — 2026-06-29
+
+- **Multi-sample gallery matching (local backend).** Instead of comparing a
+  query against a single reference photo per identity, the local matcher now
+  builds a small **gallery** — the cover image plus the best enhanced detection
+  crops — for both the query cluster and each identity, and scores by the mean
+  of the top-K query×gallery cosine pairs. This is much more robust to bad
+  angles/lighting in any single crop. Tune with `AI_GALLERY_SAMPLES` (crops per
+  face, default 5) and `LOCAL_GALLERY_TOPK` (default 3). Gemini stays
+  single-image to keep its per-call cost bounded.
+- **Higher default match floor.** With alignment + galleries, true matches sit
+  well above non-matches, so `LOCAL_SIM_UNKNOWN` now defaults to **0.40** (was
+  0.30) — weak best-guesses (e.g. cosine 0.31) now correctly read as "no
+  confident match" instead of a misleading low-confidence suggestion.
+- The AI-suggest panel label is now backend-neutral ("AI suggests").
+
 ## 0.6.0 — 2026-06-29
 
 - **Local matching accuracy: face detection + alignment.** The local backend

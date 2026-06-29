@@ -222,8 +222,12 @@ class LocalClient:
         self._pack = (os.getenv("LOCAL_FACE_PACK", _DEFAULT_PACK) or _DEFAULT_PACK).strip()
         # Cosine-similarity calibration. Below `unknown` -> UNKNOWN; at/above
         # `strong` -> ~1.0 confidence (so the UI auto-checks confident matches).
-        self._sim_unknown = _envf("LOCAL_SIM_UNKNOWN", 0.30)
+        # With alignment + galleries, true matches sit well above 0.4 and
+        # non-matches below, so 0.4 is a sane floor (was 0.3).
+        self._sim_unknown = _envf("LOCAL_SIM_UNKNOWN", 0.40)
         self._sim_strong = _envf("LOCAL_SIM_STRONG", 0.55)
+        # Identity score = mean of the top-K query×gallery cosine pairs.
+        self._gallery_topk = max(1, int(_envf("LOCAL_GALLERY_TOPK", 3)))
 
         # Loaded lazily on first use so app startup never blocks on a download.
         self._compiled = None
@@ -425,10 +429,26 @@ class LocalClient:
             return 1.0 if sim >= hi else 0.0
         return float(max(0.0, min(1.0, (sim - lo) / (hi - lo))))
 
+    def _aggregate(self, sims: list[float]) -> float:
+        """Identity score from a bag of query×gallery cosine similarities: the
+        mean of the top-K. Top-K (not plain max) resists a single lucky pair;
+        not the global mean, so a few off-angle gallery shots don't drag a true
+        match down."""
+        sims.sort(reverse=True)
+        k = min(len(sims), self._gallery_topk)
+        return sum(sims[:k]) / k if k else -1.0
+
     def suggest(self, query_image: bytes, identities: list[dict],
-                cache_key: str | None = None) -> dict[str, Any]:
-        """Match `query_image` against `identities` by embedding cosine
-        similarity. Same return schema as GeminiClient.suggest."""
+                cache_key: str | None = None,
+                query_images: list[bytes] | None = None) -> dict[str, Any]:
+        """Match a query face against identities by embedding cosine similarity.
+
+        Multi-sample aware: each identity may carry ``images`` (a gallery of
+        sample crops) and the query may carry ``query_images`` (several crops of
+        the same cluster). The identity score is the mean of the top-K cosine
+        similarities over all query×gallery pairs — far more robust than a single
+        reference photo. Falls back to the single ``image``/``query_image`` when
+        lists aren't supplied. Same return schema as GeminiClient.suggest."""
         if cache_key is not None:
             fp = ",".join(sorted(i["id"] for i in identities))
             with self._cache_lock:
@@ -436,37 +456,55 @@ class LocalClient:
             if hit is not None:
                 return hit
 
-        q = self._embed(query_image)
-        best_sim = -1.0
-        best: dict | None = None
-        for ident in identities:
-            img = ident.get("image")
-            if not img:
-                continue
+        q_sources = query_images or ([query_image] if query_image else [])
+        q_embs: list[np.ndarray] = []
+        for qi in q_sources:
             try:
-                sim = float(np.dot(q, self._embed(img)))
+                q_embs.append(self._embed(qi))
             except Exception:
                 continue
-            if sim > best_sim:
-                best_sim = sim
-                best = ident
 
-        if best is None or best_sim < self._sim_unknown:
+        best_score = -1.0
+        best: dict | None = None
+        best_pairs = 0
+        if q_embs:
+            for ident in identities:
+                g_sources = ident.get("images") or (
+                    [ident["image"]] if ident.get("image") else [])
+                sims: list[float] = []
+                for gi in g_sources:
+                    try:
+                        ge = self._embed(gi)
+                    except Exception:
+                        continue
+                    sims.extend(float(np.dot(qe, ge)) for qe in q_embs)
+                if not sims:
+                    continue
+                score = self._aggregate(sims)
+                if score > best_score:
+                    best_score, best, best_pairs = score, ident, len(sims)
+
+        if not q_embs:
+            result = {"identityId": None, "name": None, "confidence": 0.0,
+                      "reason": "could not embed query face"}
+        elif best is None or best_score < self._sim_unknown:
             result = {
                 "identityId": None,
                 "name": None,
-                "confidence": self._confidence(best_sim) if best is not None else 0.0,
+                "confidence": self._confidence(best_score) if best is not None else 0.0,
                 "reason": (
-                    f"no match (best cosine {best_sim:.2f} < {self._sim_unknown:.2f})"
+                    f"no match (best cosine {best_score:.2f} < {self._sim_unknown:.2f})"
                     if best is not None else "no comparable identities"
                 ),
             }
         else:
+            k = min(best_pairs, self._gallery_topk)
             result = {
                 "identityId": best["id"],
                 "name": best["name"],
-                "confidence": self._confidence(best_sim),
-                "reason": f"ArcFace cosine {best_sim:.2f} → {best['name']}",
+                "confidence": self._confidence(best_score),
+                "reason": (f"ArcFace cosine {best_score:.2f} "
+                           f"(top-{k} of {best_pairs} samples) → {best['name']}"),
             }
 
         if cache_key is not None:

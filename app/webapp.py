@@ -134,6 +134,7 @@ def create_app(client: ProtectClient) -> FastAPI:
     # In-memory cache for reference identity images used by AI suggest.
     # Saves 14+ HTTP round-trips per suggestion after the first call.
     _ref_image_cache: dict[str, tuple[float, bytes]] = {}
+    _ref_images_cache: dict[tuple[str, int], tuple[float, list[bytes]]] = {}
     _ref_image_lock = threading.Lock()
     _REF_IMAGE_TTL = 30 * 60  # 30 minutes
 
@@ -158,6 +159,74 @@ def create_app(client: ProtectClient) -> FastAPI:
     def invalidate_ref_image(group_id: str) -> None:
         with _ref_image_lock:
             _ref_image_cache.pop(group_id, None)
+            for key in [k for k in _ref_images_cache if k[0] == group_id]:
+                _ref_images_cache.pop(key, None)
+
+    def get_reference_images(group_id: str, k: int) -> list[bytes]:
+        """Up to k face crops for a group, for multi-sample local matching.
+
+        The cover image plus the k-best enhanced detection crops (ranked by
+        matchedGroupConfidence) — a small gallery that's far more robust than a
+        single reference photo. Cached per (group, k)."""
+        if k <= 1:
+            img = get_reference_image(group_id)
+            return [img] if img else []
+        now = time.time()
+        with _ref_image_lock:
+            cached = _ref_images_cache.get((group_id, k))
+            if cached and now - cached[0] < _REF_IMAGE_TTL:
+                return cached[1]
+
+        imgs: list[bytes] = []
+        cover = get_reference_image(group_id)
+        if cover:
+            imgs.append(cover)
+        try:
+            dets: list[dict] = []
+            for page in range(1, 3):
+                r = client.get(
+                    f"{BASE_PROTECT}/recognition/face/groups/{group_id}/detections",
+                    params={"page": page, "pageSize": 100},
+                )
+                if r.status_code != 200:
+                    break
+                batch = r.json().get("detections", [])
+                if not batch:
+                    break
+                dets.extend(batch)
+                if len(batch) < 100:
+                    break
+            enhanced = [d for d in dets if d.get("enhancedImageId")]
+            enhanced.sort(key=lambda d: d.get("matchedGroupConfidence") or 0, reverse=True)
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                fetched = list(ex.map(
+                    lambda d: client.get(
+                        f"{BASE_PROTECT}/thumbnails/enhanced/{d['enhancedImageId']}"),
+                    enhanced[: k * 2],  # over-fetch a little; some may fail
+                ))
+            for resp in fetched:
+                if len(imgs) >= k:
+                    break
+                if resp.status_code == 200 and resp.content:
+                    imgs.append(resp.content)
+        except Exception:
+            pass
+
+        imgs = imgs[:k]
+        with _ref_image_lock:
+            _ref_images_cache[(group_id, k)] = (time.time(), imgs)
+        return imgs
+
+    # How many sample crops per face to use for local (gallery) matching. 1
+    # restores single-photo behaviour. Only the local backend uses galleries;
+    # Gemini stays single-image to keep its per-call cost bounded.
+    def _gallery_samples() -> int:
+        if ai_kind != "local":
+            return 1
+        try:
+            return max(1, int(os.getenv("AI_GALLERY_SAMPLES", "5") or 5))
+        except ValueError:
+            return 5
 
     @app.get("/")
     def root() -> FileResponse:
@@ -608,28 +677,33 @@ def create_app(client: ProtectClient) -> FastAPI:
         if not identities_raw:
             raise HTTPException(400, "no known identities to compare against")
 
-        # Pull every image in parallel — this is the dominant latency.
-        def fetch_query():
-            return get_reference_image(groupId)
+        # Pull every gallery in parallel — this is the dominant latency. k=1 for
+        # Gemini (single photo); several for local (multi-sample matching).
+        k = _gallery_samples()
         with ThreadPoolExecutor(max_workers=16) as ex:
-            fut_q = ex.submit(fetch_query)
-            futs = {ex.submit(get_reference_image, g["id"]): g for g in identities_raw}
-            query_image = fut_q.result()
+            fut_q = ex.submit(get_reference_images, groupId, k)
+            futs = {ex.submit(get_reference_images, g["id"], k): g for g in identities_raw}
+            query_imgs = fut_q.result()
             identities: list[dict] = []
             for fut, g in futs.items():
-                img = fut.result()
-                if img:
+                imgs = fut.result()
+                if imgs:
                     identities.append({
                         "id": g["id"],
                         "name": g.get("name") or g.get("matchedName") or g["id"],
-                        "image": img,
+                        "image": imgs[0],   # single photo for Gemini
+                        "images": imgs,     # gallery for local
                     })
 
-        if not query_image:
+        if not query_imgs:
             raise HTTPException(404, "could not fetch query face")
 
         try:
-            result = ai.suggest(query_image, identities, cache_key=groupId)
+            if ai_kind == "local":
+                result = ai.suggest(query_imgs[0], identities, cache_key=groupId,
+                                    query_images=query_imgs)
+            else:
+                result = ai.suggest(query_imgs[0], identities, cache_key=groupId)
         except Exception as e:
             raise HTTPException(500, f"AI call failed: {type(e).__name__}: {e}")
         return result
@@ -658,26 +732,33 @@ def create_app(client: ProtectClient) -> FastAPI:
         if not identities_raw:
             raise HTTPException(400, "no known identities to compare against")
 
-        # Fetch the identity lineup once (cached across the whole batch).
+        # Fetch the identity galleries once (cached across the whole batch).
+        k = _gallery_samples()
         with ThreadPoolExecutor(max_workers=16) as ex:
-            imgs = list(ex.map(lambda g: get_reference_image(g["id"]), identities_raw))
+            sample_lists = list(ex.map(
+                lambda g: get_reference_images(g["id"], k), identities_raw))
         identities = [
             {
                 "id": g["id"],
                 "name": g.get("name") or g.get("matchedName") or g["id"],
-                "image": img,
+                "image": imgs[0],
+                "images": imgs,
             }
-            for g, img in zip(identities_raw, imgs) if img
+            for g, imgs in zip(identities_raw, sample_lists) if imgs
         ]
         if not identities:
             raise HTTPException(404, "could not fetch any identity reference images")
 
         def work(gid: str) -> dict:
             try:
-                q = get_reference_image(gid)
-                if not q:
+                q_imgs = get_reference_images(gid, k)
+                if not q_imgs:
                     return {"groupId": gid, "error": "no query image"}
-                res = ai.suggest(q, identities, cache_key=gid)
+                if ai_kind == "local":
+                    res = ai.suggest(q_imgs[0], identities, cache_key=gid,
+                                     query_images=q_imgs)
+                else:
+                    res = ai.suggest(q_imgs[0], identities, cache_key=gid)
                 return {"groupId": gid, **res}
             except Exception as e:
                 return {"groupId": gid, "error": f"{type(e).__name__}: {e}"}
