@@ -139,6 +139,16 @@ All config is read from environment variables — see
 | `DRY_RUN` | `false` | List detections without enhancing |
 | `RUN_ONCE` | `false` | One cycle then exit (good for cron) |
 | `FETCH_WORKERS` | `8` | Parallel workers for fetching detections |
+| `ENHANCE_PHANTOMS` | `true` | Also enhance "unknown"/"degraded" faces that Protect keeps out of the groups listing (see below). |
+
+> **Unknown/degraded faces.** Protect's `/recognition/face/groups` listing only
+> contains *committed* groups. "Unknown" and "degraded" faces never appear there
+> — they exist only as references inside `smartDetectZone` events — so before
+> `ENHANCE_PHANTOMS`, the enhancer never enhanced them (on a real instance that
+> was ~75% of all faces). With it on (default), each cycle harvests those
+> unlisted groups via the same sliding window as the triage view
+> (`PHANTOM_WINDOWS` / `PHANTOM_EVENT_LIMIT`) and enhances them too. The first
+> run can add a large backlog; the adaptive throttle paces it.
 
 ### Webapp
 

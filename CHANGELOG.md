@@ -2,6 +2,24 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.4.0 — 2026-06-29
+
+- **Fix: "unknown" and "degraded" faces were never enhanced.** The background
+  enhancer built its work list solely from `/recognition/face/groups`, but
+  Protect keeps unknown/degraded faces OUT of that listing — they only exist as
+  references inside `smartDetectZone` events. So every such face (verified on a
+  live instance: **878 unlisted groups vs 295 listed**, i.e. ~75% of all faces)
+  was silently skipped, even though POSTing enhance on them returns `200`. The
+  webapp's triage view already surfaced them via
+  `ProtectClient.harvest_phantom_groups`; the enhancer just never used it.
+  Each cycle now harvests those unlisted groups (same sliding-window event walk)
+  and enhances them too. On the test instance this turned a cycle that found
+  **0 detections to enhance into 877 never-tried** unknown/degraded faces.
+  - New `ENHANCE_PHANTOMS` env (default `true`) toggles the behaviour; depth is
+    shared with the triage view via `PHANTOM_WINDOWS` / `PHANTOM_EVENT_LIMIT`.
+  - First run can submit a large one-off backlog; the existing adaptive throttle
+    against the AI Key's 200-event queue paces it so nothing is dropped.
+
 ## 0.3.2 — 2026-06-25
 
 - **Cost controls for AI matching.** Each face comparison sends the query face
