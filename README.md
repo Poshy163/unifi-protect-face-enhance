@@ -204,8 +204,9 @@ being detected (raise `LOCAL_DETECT_SIZE` or lower `LOCAL_DETECT_SCORE`).
 | `LOCAL_DETECT_SCORE` | `0.5` | SCRFD detector confidence floor (lower detects more faces). |
 | `LOCAL_DETECT_SIZE` | `640` | SCRFD square input (multiple of 32). Bigger = better recall on small/off-centre faces, a bit slower. |
 | `LOCAL_DETECT_MIN_SIZE` | `160` | Upscale crops whose short side is below this before detecting (helps tiny thumbnails). `0` disables. |
-| `AI_GALLERY_SAMPLES` | `5` | Crops per face used for matching (a "gallery"). Compares against several samples per identity instead of one photo — much more robust. `1` = single-photo behaviour. |
+| `AI_GALLERY_SAMPLES` | `5` | Crops per face used for matching (a "gallery"). Compares against several **highest-confidence** samples per identity instead of one photo — much more robust. `1` = single-photo behaviour. |
 | `LOCAL_GALLERY_TOPK` | `3` | Identity score is the mean of the top-K query×gallery cosine pairs. |
+| `LOCAL_GALLERY_MIN_CONF` | `0` | Drop gallery detections below this `matchedGroupConfidence` (0–1). Protect sometimes misattributes low-confidence detections to the wrong person; one impostor crop poisons the gallery. Raise to ~`0.6` if you see confident **cross-person** matches. |
 | `LOCAL_FACE_MODEL` / `LOCAL_DETECT_MODEL` | *(empty)* | Paths to your own recognition / detector models, bypassing auto-download. |
 | `LOCAL_MODEL_DIR` | `~/.cache/unifi-protect-face` | Where downloaded models are cached. Mount a volume here to persist them (the bundled compose file does). |
 | `LOCAL_SIM_UNKNOWN` | `0.40` | Cosine floor — below this a face is reported as no match. Raise to cut false matches; lower if real matches are missed. |

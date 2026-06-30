@@ -31,23 +31,17 @@ _AI_UNCONFIGURED = (
 )
 
 
-def _spread_sample(items: list, n: int) -> list:
-    """Pick up to ``n`` items spread evenly across ``items`` (assumed sorted),
-    always keeping the first and last.
+def _gallery_min_conf() -> float:
+    """Drop gallery detections below this `matchedGroupConfidence` (0–1).
 
-    Used to sample a *variety* of face angles from a confidence-sorted detection
-    list instead of only the top-ranked (most frontal, least varied) crops — so
-    the gallery covers off-angle shots too, which is what helps an off-centre
-    query match."""
-    if n <= 0 or not items:
-        return []
-    if n >= len(items):
-        return items
-    if n == 1:
-        return items[:1]
-    last = len(items) - 1
-    idxs = sorted({round(i * last / (n - 1)) for i in range(n)})
-    return [items[i] for i in idxs]
+    Low-confidence detections are the ones Protect most often *misattributes* to
+    the wrong person; one wrong face in a gallery causes confident false matches.
+    Default 0 (off) keeps every confidence; raise (e.g. 0.6) to harden galleries
+    if you see cross-person matches."""
+    try:
+        return max(0.0, float(os.getenv("LOCAL_GALLERY_MIN_CONF", "0") or 0))
+    except ValueError:
+        return 0.0
 
 
 def _ai_batch_max() -> int:
@@ -217,22 +211,29 @@ def create_app(client: ProtectClient) -> FastAPI:
                     break
             enhanced = [d for d in dets if d.get("enhancedImageId")]
             enhanced.sort(key=lambda d: d.get("matchedGroupConfidence") or 0, reverse=True)
-            # Diversify: don't just take the top-confidence (most frontal, least
-            # varied) crops — spread the picks across the confidence range so the
-            # gallery includes off-angle shots. These detections are all already
-            # grouped to this identity by Protect, so the spread stays on-person.
-            candidates = _spread_sample(enhanced, k * 2)  # over-fetch; some may fail
+            # Precision over variety: take the HIGHEST-confidence crops. Low
+            # matchedGroupConfidence detections are the ones Protect most often
+            # misattributes to the wrong person, and a single impostor in the
+            # gallery causes confident cross-person matches. An optional floor
+            # (LOCAL_GALLERY_MIN_CONF) hardens this further. Good query alignment
+            # (SCRFD) handles off-angle queries, so we don't need off-angle
+            # gallery samples to get recall.
+            floor = _gallery_min_conf()
+            if floor > 0:
+                enhanced = [d for d in enhanced
+                            if (d.get("matchedGroupConfidence") or 0) >= floor]
+            candidates = enhanced[: k * 2]  # over-fetch a little; some may fail
             with ThreadPoolExecutor(max_workers=8) as ex:
                 fetched = list(ex.map(
                     lambda d: client.get(
                         f"{BASE_PROTECT}/thumbnails/enhanced/{d['enhancedImageId']}"),
                     candidates,
                 ))
-            # Keep a spread of the *successful* fetches (ordered high→low
-            # confidence) rather than the first few — so dropped fetches don't
-            # collapse the gallery back onto the frontal end.
-            ok = [r.content for r in fetched if r.status_code == 200 and r.content]
-            imgs.extend(_spread_sample(ok, max(0, k - len(imgs))))
+            for resp in fetched:
+                if len(imgs) >= k:
+                    break
+                if resp.status_code == 200 and resp.content:
+                    imgs.append(resp.content)
         except Exception:
             pass
 

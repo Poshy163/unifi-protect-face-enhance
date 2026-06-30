@@ -24,10 +24,13 @@ Versioning starts here. Older changes are summarized in the initial entry.
   `detectStats` (`aligned` / `fallback` / `alignedPct`) so you can see how often
   detection is failing, plus `detectSize`. New knobs: `LOCAL_DETECT_SIZE`
   (default 640) and `LOCAL_DETECT_MIN_SIZE`.
-- **Diversified galleries.** Per-identity galleries now sample a *spread* across
-  the confidence-ranked detections (keeping a spread of the successful fetches)
-  instead of only the top-confidence, most-frontal crops — so the gallery covers
-  varied angles and an off-centre query is more likely to match a sample.
+- **Gallery precision (impostor guard).** Per-identity galleries use the
+  **highest-confidence** detections only. Low `matchedGroupConfidence` crops are
+  the ones Protect most often misattributes to the wrong person, and a single
+  impostor in a gallery causes confident cross-person matches; good query
+  alignment (above) already handles off-angle recall, so there's no need to dip
+  into the noisy low-confidence crops. New `LOCAL_GALLERY_MIN_CONF` drops gallery
+  detections below a confidence floor (0 = off) to harden this further.
 
 ## 0.7.1 — 2026-06-30
 
