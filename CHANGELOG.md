@@ -2,6 +2,19 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.7.1 — 2026-06-30
+
+- **AI-suggest panel alignment fixed.** The "Unnamed face" and "AI suggests"
+  columns are now top-aligned with matching fixed-size (140×140) image boxes, so
+  the two faces line up instead of the suggestion floating higher/larger because
+  of the name + confidence text below it. The `→` arrow sits at the image
+  centre.
+- **Real no-match placeholder.** Instead of hiding an empty `<img>` (which left a
+  broken-image glyph / collapsed the box), the no-match, thinking, and error
+  states now render a proper placeholder — a dashed box with a person silhouette
+  and a short label ("No match" / "…" / "Error") — that keeps the box size
+  constant and never shows a broken image.
+
 ## 0.7.0 — 2026-06-29
 
 - **Multi-sample gallery matching (local backend).** Instead of comparing a

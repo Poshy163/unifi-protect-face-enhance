@@ -633,6 +633,36 @@
     transition: width 0.3s;
   }
 
+  /* AI suggest review modal */
+  .ai-compare {
+    display: flex; gap: 16px;
+    align-items: flex-start; justify-content: center;
+    margin: 8px 0 16px;
+  }
+  .ai-compare .col { text-align: center; }
+  .ai-col-label {
+    font-size: 11px; color: var(--fg-dim);
+    height: 15px; line-height: 15px; margin-bottom: 4px;
+  }
+  .ai-face-wrap { position: relative; width: 140px; height: 140px; }
+  .ai-face {
+    width: 140px; height: 140px;
+    object-fit: cover; border-radius: 8px;
+    background: var(--bg-3); display: block;
+  }
+  .ai-face-placeholder {
+    position: absolute; inset: 0;
+    display: none; align-items: center; justify-content: center;
+    flex-direction: column; gap: 6px;
+    border-radius: 8px; background: var(--bg-3);
+    border: 1px dashed rgba(147, 163, 191, 0.3);
+    color: var(--fg-dim);
+  }
+  .ai-face-placeholder svg { width: 44px; height: 44px; opacity: 0.45; }
+  .ai-face-placeholder .ai-ph-text { font-size: 11px; }
+  .ai-arrow { font-size: 24px; color: var(--fg-dim); margin-top: 75px; }
+  .ai-meta { margin-top: 6px; min-height: 34px; }
+
   .kbd {
     font-family: ui-monospace, "JetBrains Mono", monospace;
     background: var(--bg-3);
@@ -839,17 +869,27 @@
     <div class="modal" style="min-width:480px">
       <h3>AI suggest · <span id="ai-progress">—</span></h3>
       <p id="ai-status">…</p>
-      <div style="display:flex;gap:16px;align-items:center;justify-content:center;margin:8px 0 16px">
-        <div style="text-align:center">
-          <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">Unnamed face</div>
-          <img id="ai-query-img" style="width:140px;height:140px;object-fit:cover;border-radius:8px;background:var(--bg-3)">
+      <div class="ai-compare">
+        <div class="col">
+          <div class="ai-col-label">Unnamed face</div>
+          <div class="ai-face-wrap">
+            <img id="ai-query-img" class="ai-face">
+          </div>
         </div>
-        <div style="font-size:24px;color:var(--fg-dim)">→</div>
-        <div style="text-align:center">
-          <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">AI suggests</div>
-          <img id="ai-suggest-img" onerror="this.style.display='none'" style="width:140px;height:140px;object-fit:cover;border-radius:8px;background:var(--bg-3)">
-          <div style="margin-top:6px"><span id="ai-suggest-name" style="font-weight:600">—</span></div>
-          <div><span id="ai-suggest-conf" style="font-size:11px;color:var(--fg-dim)">—</span></div>
+        <div class="ai-arrow">→</div>
+        <div class="col">
+          <div class="ai-col-label">AI suggests</div>
+          <div class="ai-face-wrap">
+            <img id="ai-suggest-img" class="ai-face" onerror="showAiPlaceholder('No image')">
+            <div id="ai-suggest-placeholder" class="ai-face-placeholder">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 12a4.9 4.9 0 1 0 0-9.8 4.9 4.9 0 0 0 0 9.8Zm0 2.45c-3.27 0-9.8 1.64-9.8 4.9v2.45h19.6v-2.45c0-3.26-6.53-4.9-9.8-4.9Z"/></svg>
+              <span class="ai-ph-text">No match</span>
+            </div>
+          </div>
+          <div class="ai-meta">
+            <div><span id="ai-suggest-name" style="font-weight:600">—</span></div>
+            <div><span id="ai-suggest-conf" style="font-size:11px;color:var(--fg-dim)">—</span></div>
+          </div>
         </div>
       </div>
       <div id="ai-reason" style="font-size:12px;color:var(--fg-dim);text-align:center;margin-bottom:12px"></div>
@@ -1701,6 +1741,23 @@ function prefetchNextSuggestion() {
   ai.prefetched.set(next, { pending: p });
 }
 
+// Toggle the "AI suggests" box between a real avatar and a placeholder so we
+// never show a broken-image glyph and the box keeps its fixed size (alignment).
+function showAiPlaceholder(text) {
+  const img = $("ai-suggest-img");
+  const ph = $("ai-suggest-placeholder");
+  img.removeAttribute("src");
+  img.style.visibility = "hidden";
+  if (text != null) ph.querySelector(".ai-ph-text").textContent = text;
+  ph.style.display = "flex";
+}
+function showAiSuggestImg(src) {
+  const img = $("ai-suggest-img");
+  $("ai-suggest-placeholder").style.display = "none";
+  img.style.visibility = "visible";
+  img.src = src;
+}
+
 async function stepAi() {
   if (!ai.running) return;
   const total = state.cards.length;
@@ -1711,8 +1768,7 @@ async function stepAi() {
   const groupId = ai.queue.shift();
   ai.current = groupId;
   $("ai-query-img").src = avatarUrl(groupId);
-  $("ai-suggest-img").removeAttribute("src");
-  $("ai-suggest-img").style.display = "none";
+  showAiPlaceholder("…");
   $("ai-suggest-name").textContent = "…thinking";
   $("ai-suggest-name").style.color = "";
   $("ai-suggest-conf").textContent = "";
@@ -1733,6 +1789,7 @@ async function stepAi() {
     }
   } catch (e) {
     $("ai-status").textContent = `Failed: ${e.message}`;
+    showAiPlaceholder("Error");
     $("ai-suggest-name").textContent = "—";
     // Kick off the next one so we recover quickly
     prefetchNextSuggestion();
@@ -1743,8 +1800,7 @@ async function stepAi() {
 
   if (!suggest.identityId) {
     $("ai-status").textContent = "No confident match";
-    $("ai-suggest-img").removeAttribute("src");
-    $("ai-suggest-img").style.display = "none";
+    showAiPlaceholder("No match");
     $("ai-suggest-name").textContent = "Unknown";
     $("ai-suggest-name").style.color = "var(--fg-dim)";
     $("ai-suggest-conf").textContent = `confidence ${Math.round((suggest.confidence||0)*100)}%`;
@@ -1752,8 +1808,7 @@ async function stepAi() {
     $("ai-yes").disabled = true;
   } else {
     $("ai-status").textContent = "Press Y to merge, N to skip";
-    $("ai-suggest-img").style.display = "";
-    $("ai-suggest-img").src = avatarUrl(suggest.identityId);
+    showAiSuggestImg(avatarUrl(suggest.identityId));
     $("ai-suggest-name").textContent = suggest.name;
     $("ai-suggest-name").style.color = suggest.confidence >= 0.85 ? "var(--ok)" : "var(--warn)";
     $("ai-suggest-conf").textContent = `confidence ${Math.round(suggest.confidence*100)}%`;
