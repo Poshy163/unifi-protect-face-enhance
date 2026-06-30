@@ -185,17 +185,25 @@ with `AI_PROVIDER`:
 
 **Local backend** (`AI_PROVIDER=local`):
 
-Matching runs a proper face pipeline: a **YuNet** detector finds the face and
-its 5 landmarks, the crop is **aligned** to ArcFace's canonical layout, then the
-recognition model embeds it and matches by cosine similarity. Alignment matters
-a lot — ArcFace is trained on aligned faces, so skipping it badly hurts accuracy.
+Matching runs a proper face pipeline: a **SCRFD** detector (the one bundled
+inside the InsightFace pack itself — no extra download) finds the face and its 5
+keypoints, the crop is **aligned** to ArcFace's canonical layout via a
+least-squares similarity fit, then the recognition model embeds it and matches by
+cosine similarity. Alignment matters a lot — ArcFace is trained on aligned faces,
+so skipping it badly hurts accuracy. SCRFD is much stronger than the old YuNet on
+off-angle / profile / partial faces, so off-centre subjects now align and match
+instead of silently falling back to an unaligned resize. Watch
+`detectStats.alignedPct` in `GET /api/ai/status` — a low value means faces aren't
+being detected (raise `LOCAL_DETECT_SIZE` or lower `LOCAL_DETECT_SCORE`).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OPENVINO_DEVICE` | `CPU` | `CPU`, `GPU` (Intel iGPU), or `AUTO`. 13th-gen "H" chips have no NPU, so CPU/iGPU are the targets. `GET /api/ai/status` lists what OpenVINO detects (`availableDevices`). |
 | `LOCAL_FACE_PACK` | `buffalo_l` | Recognition model, weakest→strongest: `buffalo_s` (MobileFaceNet, ~13 MB), `buffalo_l` (ResNet50, ~166 MB), `antelopev2` (ResNet100/Glint360K, ~260 MB, most accurate, ~2× slower). |
 | `LOCAL_ALIGN` | `true` | Detect + align faces before embedding. Leave on — it's the single biggest accuracy lever. |
-| `LOCAL_DETECT_SCORE` | `0.5` | YuNet detector confidence floor (lower detects more faces). |
+| `LOCAL_DETECT_SCORE` | `0.5` | SCRFD detector confidence floor (lower detects more faces). |
+| `LOCAL_DETECT_SIZE` | `640` | SCRFD square input (multiple of 32). Bigger = better recall on small/off-centre faces, a bit slower. |
+| `LOCAL_DETECT_MIN_SIZE` | `160` | Upscale crops whose short side is below this before detecting (helps tiny thumbnails). `0` disables. |
 | `AI_GALLERY_SAMPLES` | `5` | Crops per face used for matching (a "gallery"). Compares against several samples per identity instead of one photo — much more robust. `1` = single-photo behaviour. |
 | `LOCAL_GALLERY_TOPK` | `3` | Identity score is the mean of the top-K query×gallery cosine pairs. |
 | `LOCAL_FACE_MODEL` / `LOCAL_DETECT_MODEL` | *(empty)* | Paths to your own recognition / detector models, bypassing auto-download. |

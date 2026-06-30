@@ -31,6 +31,25 @@ _AI_UNCONFIGURED = (
 )
 
 
+def _spread_sample(items: list, n: int) -> list:
+    """Pick up to ``n`` items spread evenly across ``items`` (assumed sorted),
+    always keeping the first and last.
+
+    Used to sample a *variety* of face angles from a confidence-sorted detection
+    list instead of only the top-ranked (most frontal, least varied) crops — so
+    the gallery covers off-angle shots too, which is what helps an off-centre
+    query match."""
+    if n <= 0 or not items:
+        return []
+    if n >= len(items):
+        return items
+    if n == 1:
+        return items[:1]
+    last = len(items) - 1
+    idxs = sorted({round(i * last / (n - 1)) for i in range(n)})
+    return [items[i] for i in idxs]
+
+
 def _ai_batch_max() -> int:
     """Hard cap on how many faces one ⚡ Auto-match run sends to Gemini.
 
@@ -198,17 +217,22 @@ def create_app(client: ProtectClient) -> FastAPI:
                     break
             enhanced = [d for d in dets if d.get("enhancedImageId")]
             enhanced.sort(key=lambda d: d.get("matchedGroupConfidence") or 0, reverse=True)
+            # Diversify: don't just take the top-confidence (most frontal, least
+            # varied) crops — spread the picks across the confidence range so the
+            # gallery includes off-angle shots. These detections are all already
+            # grouped to this identity by Protect, so the spread stays on-person.
+            candidates = _spread_sample(enhanced, k * 2)  # over-fetch; some may fail
             with ThreadPoolExecutor(max_workers=8) as ex:
                 fetched = list(ex.map(
                     lambda d: client.get(
                         f"{BASE_PROTECT}/thumbnails/enhanced/{d['enhancedImageId']}"),
-                    enhanced[: k * 2],  # over-fetch a little; some may fail
+                    candidates,
                 ))
-            for resp in fetched:
-                if len(imgs) >= k:
-                    break
-                if resp.status_code == 200 and resp.content:
-                    imgs.append(resp.content)
+            # Keep a spread of the *successful* fetches (ordered high→low
+            # confidence) rather than the first few — so dropped fetches don't
+            # collapse the gallery back onto the frontal end.
+            ok = [r.content for r in fetched if r.status_code == 200 and r.content]
+            imgs.extend(_spread_sample(ok, max(0, k - len(imgs))))
         except Exception:
             pass
 

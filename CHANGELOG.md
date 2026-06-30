@@ -2,6 +2,33 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.8.0 — 2026-06-30
+
+- **SCRFD detector replaces YuNet (much better on off-centre faces).** The local
+  backend now detects faces with the **SCRFD** model bundled *inside* the
+  InsightFace pack (`scrfd_10g_bnkps` / `det_10g` / `det_500m`) — which we were
+  downloading and throwing away — instead of a separately-fetched YuNet. SCRFD is
+  far stronger on off-angle / profile / partial / small faces, which were the
+  crops that previously failed detection and silently fell back to an unaligned
+  resize (the cause of "looks identical but no match"). No new download: the
+  detector comes out of the pack zip you already pull. Runs on the same OpenVINO
+  device as recognition and is thread-safe, so batch matching detects
+  concurrently.
+- **Least-squares (Umeyama) alignment.** Landmark alignment now uses a
+  least-squares similarity fit over all 5 keypoints — InsightFace's canonical
+  `norm_crop` — instead of `cv2.estimateAffinePartial2D` with LMEDS, which could
+  discard a good landmark (with only 5 points) and warp the face poorly.
+- **Tiny-crop upscaling + fallback visibility.** Crops whose short side is below
+  `LOCAL_DETECT_MIN_SIZE` (default 160) are upscaled before detection so small
+  thumbnails carry enough detail. `GET /api/ai/status` now reports
+  `detectStats` (`aligned` / `fallback` / `alignedPct`) so you can see how often
+  detection is failing, plus `detectSize`. New knobs: `LOCAL_DETECT_SIZE`
+  (default 640) and `LOCAL_DETECT_MIN_SIZE`.
+- **Diversified galleries.** Per-identity galleries now sample a *spread* across
+  the confidence-ranked detections (keeping a spread of the successful fetches)
+  instead of only the top-confidence, most-frontal crops — so the gallery covers
+  varied angles and an off-centre query is more likely to match a sample.
+
 ## 0.7.1 — 2026-06-30
 
 - **AI-suggest panel alignment fixed.** The "Unnamed face" and "AI suggests"
