@@ -12,7 +12,8 @@ Two tools in one Docker container:
    one-click replacement of an identity's reference photo with the clearest
    available face crop.
 
-Tested on **UniFi OS 5.1.11** with **Protect 7.1.55** and the **UP-AI-KEY**.
+Tested on **UniFi OS 5.1.27** with **Protect 7.2.84** and the **UP-AI-KEY**
+(and originally on UniFi OS 5.1.11 / Protect 7.1.55).
 
 The Protect endpoints used here are undocumented/private and may change
 between firmware versions.
@@ -140,15 +141,13 @@ All config is read from environment variables — see
 | `DRY_RUN` | `false` | List detections without enhancing |
 | `RUN_ONCE` | `false` | One cycle then exit (good for cron) |
 | `FETCH_WORKERS` | `8` | Parallel workers for fetching detections |
-| `ENHANCE_PHANTOMS` | `true` | Also enhance "unknown"/"degraded" faces that Protect keeps out of the groups listing (see below). |
+| `ENHANCE_DEGRADED` | `true` | Also enhance "degraded" (low-quality) faces that Protect keeps out of the default groups listing (see below). Formerly `ENHANCE_PHANTOMS`, still accepted. |
 
-> **Unknown/degraded faces.** Protect's `/recognition/face/groups` listing only
-> contains *committed* groups. "Unknown" and "degraded" faces never appear there
-> — they exist only as references inside `smartDetectZone` events — so before
-> `ENHANCE_PHANTOMS`, the enhancer never enhanced them (on a real instance that
-> was ~75% of all faces). With it on (default), each cycle harvests those
-> unlisted groups via the same sliding window as the triage view
-> (`PHANTOM_WINDOWS` / `PHANTOM_EVENT_LIMIT`) and enhances them too. The first
+> **Degraded faces.** Protect's `/recognition/face/groups` listing returns
+> *known* and *unknown* clusters but no **degraded** ones — on a real instance
+> that's 2,856 of 3,175 groups, so without `ENHANCE_DEGRADED` the enhancer
+> never enhanced ~90% of the faces Protect had seen. With it on (default), each
+> cycle also fetches `?labels=groupType:degraded` and enhances those. The first
 > run can add a large backlog; the adaptive throttle paces it.
 
 ### Webapp
@@ -158,9 +157,7 @@ All config is read from environment variables — see
 | `WEBAPP_ENABLED` | `true` | Serve the Face Triage webapp |
 | `WEBAPP_PORT` | `8080` | Port to bind (use the same value in compose port mapping) |
 | `WEBAPP_HOST` | `0.0.0.0` | Bind interface |
-| `PHANTOM_WINDOWS` | `4` | Sliding-window passes over `/events` to harvest faces missing from the groups listing. Each ≈ 1 day deeper. Bump for a deep one-off sweep of old faces. |
-| `PHANTOM_EVENT_LIMIT` | `1000` | Events fetched per window (Protect caps around 1000). |
-| `PHANTOM_CACHE_TTL` | `45` | Seconds to cache the harvested set. |
+| `DEGRADED_CACHE_TTL` | `45` | Seconds to cache the degraded-group listing (it's ~3 pages). |
 
 ### AI suggest (optional)
 
@@ -206,7 +203,7 @@ being detected (raise `LOCAL_DETECT_SIZE` or lower `LOCAL_DETECT_SCORE`).
 | `LOCAL_DETECT_MIN_SIZE` | `160` | Upscale crops whose short side is below this before detecting (helps tiny thumbnails). `0` disables. |
 | `AI_GALLERY_SAMPLES` | `5` | Crops per face used for matching (a "gallery"). Compares against several **highest-confidence** samples per identity instead of one photo — much more robust. `1` = single-photo behaviour. |
 | `LOCAL_GALLERY_TOPK` | `3` | Identity score is the mean of the top-K query×gallery cosine pairs. |
-| `LOCAL_GALLERY_MIN_CONF` | `0` | Drop gallery detections below this `matchedGroupConfidence` (0–1). Protect sometimes misattributes low-confidence detections to the wrong person; one impostor crop poisons the gallery. Raise to ~`0.6` if you see confident **cross-person** matches. |
+| `LOCAL_GALLERY_MIN_CONF` | `0` | Drop gallery detections below this `matchedGroupConfidence`. Protect sometimes misattributes low-confidence detections to the wrong person; one impostor crop poisons the gallery. Raise to ~`80` if you see confident **cross-person** matches. **Scale:** `matchedGroupConfidence` is a 0–100 percentage (live values run ~77–95), not the 0–1 fraction previously documented here — `0.6` dropped nothing. Values ≤ 1 are still read as the old fraction and scaled, so an existing `0.6` now behaves as `60`. |
 | `LOCAL_FACE_MODEL` / `LOCAL_DETECT_MODEL` | *(empty)* | Paths to your own recognition / detector models, bypassing auto-download. |
 | `LOCAL_MODEL_DIR` | `~/.cache/unifi-protect-face` | Where downloaded models are cached. Mount a volume here to persist them (the bundled compose file does). |
 | `LOCAL_SIM_UNKNOWN` | `0.40` | Cosine floor — below this a face is reported as no match. Raise to cut false matches; lower if real matches are missed. |
@@ -260,6 +257,7 @@ All require session auth with CSRF and may change between Protect versions.
 ```
 # Face clusters (the central model)
 GET    /proxy/protect/api/recognition/face/groups?page=N&pageSize=N
+GET    /proxy/protect/api/recognition/face/groups?labels=groupType:degraded   # degraded clusters (omitted from the default listing)
 GET    /proxy/protect/api/recognition/face/groups/{id}
 GET    /proxy/protect/api/recognition/face/groups/{id}/image
 GET    /proxy/protect/api/recognition/face/groups/{id}/detections?page=N&pageSize=N
@@ -272,9 +270,6 @@ POST   /proxy/protect/api/recognition/face/detections/{id}/image/enhance
 PATCH  /proxy/protect/api/recognition/face/detections/{id}/enhanced-image    # hide/show
 POST   /proxy/protect/api/recognition/face/assign-group             # {objectIds, groupId|null}
 POST   /proxy/protect/api/recognition/v2/merge-group                # {fromGroupIds, toGroupId}
-
-# Events (face harvest — see note below)
-GET    /proxy/protect/api/events?type=smartDetectZone&orderDirection=DESC&start=&end=&limit=
 
 # Thumbnails
 GET    /proxy/protect/api/thumbnails/{thumbnailId}                  # raw face crop
@@ -324,11 +319,16 @@ GET  /api/ai/suggest?groupId=...            # one face → {identityId, name, co
 POST /api/ai/suggest-batch                  # {groupIds:[...]} → {results:[{groupId, identityId, name, confidence, reason}]}
 ```
 
-The triage list (`GET /api/unenrolled`) merges two sources so no face is
-missed: Protect's `/recognition/face/groups` listing **plus** a sliding-window
-harvest of recent `smartDetectZone` events (group ids are read from both the
-thumbnail `group` object and its `labels` array). Tune depth with
-`PHANTOM_WINDOWS` / `PHANTOM_EVENT_LIMIT` / `PHANTOM_CACHE_TTL`.
+The triage list (`GET /api/unenrolled`) merges two listings so no face is
+missed, because Protect splits them: `/recognition/face/groups` returns known
+and unknown clusters, and `?labels=groupType:degraded` returns the degraded
+ones. Passing `include_degraded=false` skips the second (3-page) fetch
+entirely. Cache the second with `DEGRADED_CACHE_TTL`.
+
+> The `labels` filter **fails open** — an unrecognised label returns HTTP 200
+> with the full unfiltered listing rather than an error, so a typo silently
+> yields the wrong set. Both call sites validate `isDegraded` on what comes
+> back rather than trusting the status code.
 
 ## Versioning
 

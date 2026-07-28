@@ -2,6 +2,58 @@
 
 Versioning starts here. Older changes are summarized in the initial entry.
 
+## 0.9.0 — 2026-07-28
+
+Verified against **Protect 7.2.84 / UniFi OS 5.1.27**. Nothing in the previous
+release was broken by that upgrade — every endpoint, request body and response
+field the app reads still behaves identically. The changes below are things
+Protect could always do that we weren't using, plus three bugs that audit
+surfaced.
+
+- **Degraded faces come from the API now, not an events walk.** The groups
+  listing accepts a `labels` filter, and `?labels=groupType:degraded` returns
+  the complete set of low-quality clusters that the default listing omits. That
+  replaces `harvest_phantom_groups` — 111 lines of sliding-window walking over
+  `/events`, reconstructing synthetic group records from ids scraped off face
+  thumbnails — and its duplicate in the enhancer. On a live instance the walk
+  reached **833 of 2,856** degraded groups (29%); the listing returns all of
+  them, in a third of the time, as real records with true `detectionsCount`,
+  `firstDetectedAt` / `lastDetectedAt`, `imagePath` and an authoritative
+  `isDegraded`. `GET /api/unenrolled` went from ~1,100 clusters to 3,162.
+  Gone with it: `harvest_phantom_groups`, `get_phantom_groups`, `_thumb_group`,
+  `invalidate_phantom_cache`, the `_phantom` synthetic-record shim, the
+  `include_phantoms` query param, and `PHANTOM_WINDOWS` / `PHANTOM_EVENT_LIMIT`
+  / `PHANTOM_CACHE_TTL`. `ENHANCE_PHANTOMS` is now `ENHANCE_DEGRADED` (the old
+  name still works); `PHANTOM_CACHE_TTL` is now `DEGRADED_CACHE_TTL`.
+  <br>**Careful:** the `labels` filter *fails open* — an unrecognised label
+  returns HTTP 200 with the full unfiltered listing instead of an error. Both
+  call sites validate `isDegraded` on the response rather than trusting the
+  status code, and raise if the filter was ignored.
+- **Fixed: `isDegraded` was wrong on ~19% of degraded clusters.** The old code
+  inferred it from `gid.startswith("face_degraded_")` or a `groupType:` label,
+  but **552 of 2,856** degraded groups carry a bare ObjectId with no prefix and
+  no `labels` array at all, so both tests failed. Those groups were reported as
+  not-degraded, which meant `include_degraded=false` still leaked them into the
+  triage grid — it silently showed an arbitrary subset of exactly what it was
+  told to hide. Real records carry the server's own `isDegraded`, so the
+  inference is gone entirely.
+- **Fixed: `LOCAL_GALLERY_MIN_CONF` did nothing.** `matchedGroupConfidence` is
+  an integer **percentage** (0–100; live values run 77–95), but the knob was
+  documented and applied as a 0–1 fraction, so the suggested `0.6` retained
+  every detection. A real floor is ~`80`. Values ≤ 1 are still read as the old
+  fraction and scaled ×100, so an existing `0.6` now does what it meant to.
+- **Fixed: the enhancer's "Enhanced" column always printed `No`.** It read
+  `group.enhancedPath`, which is `null` on every group Protect returns — the
+  field is vestigial, and Protect's own UI never reads it either. Column
+  removed; enhancement state lives on detections and is already reported
+  per-cycle below the table.
+- **Docs: the `/events` cap note was wrong.** It claimed a hard ~1000-result
+  cap. `limit=100000` returns the full 14,694-event retention; `page` *is*
+  ignored, but `offset` works, and `start`+`end` are required for any
+  `limit > 100`. Moot now that nothing walks events, but the claim is gone.
+- Groups listings are cached per `labels` filter; `DEGRADED_CACHE_TTL`
+  (default 45s) covers the 3-page degraded fetch.
+
 ## 0.8.0 — 2026-06-30
 
 - **SCRFD detector replaces YuNet (much better on off-centre faces).** The local

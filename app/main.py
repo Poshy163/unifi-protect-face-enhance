@@ -11,12 +11,12 @@ POLL_INTERVAL seconds before doing it again. Configuration is read from
 environment variables (see .env.example).
 
 API endpoints used (undocumented/private):
-    GET  /proxy/protect/api/recognition/face/groups
+    GET  /proxy/protect/api/recognition/face/groups[?labels=groupType:degraded]
     GET  /proxy/protect/api/recognition/face/groups/{id}/detections?page=N&pageSize=N
     POST /proxy/protect/api/recognition/face/detections/{id}/image/enhance
     GET  /proxy/protect/api/bootstrap (for AI Key queue stats)
 
-Tested on UniFi OS 5.1.11 / Protect 7.1.55 / UP-AI-KEY.
+Tested on UniFi OS 5.1.27 / Protect 7.2.84 / UP-AI-KEY.
 """
 
 import base64
@@ -105,20 +105,27 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     return csrf or ""
 
 
-def get_face_groups(session: requests.Session, host: str) -> list:
+def get_face_groups(session: requests.Session, host: str,
+                    labels: str | None = None, page_size: int = 200) -> list:
     """Fetch all face groups (people), paginating through every page.
 
     The default page size is 50 and the API silently caps responses. Identity
-    groups (Face Identities in Protect 7.1+) and degraded auto-clusters often
-    fall outside the first page, so we paginate explicitly.
+    groups (Face Identities in Protect 7.1+) often fall outside the first page,
+    so we paginate explicitly.
+
+    `labels` filters server-side. The unfiltered listing returns known +
+    unknown clusters but NO degraded ones — pass "groupType:degraded" for
+    those. Note the filter fails open: an unrecognised label returns HTTP 200
+    with the full unfiltered listing, so validate what comes back.
     """
     all_groups = []
     page = 1
-    page_size = 200
 
     while True:
         url = f"https://{host}{BASE_PROTECT}/recognition/face/groups"
         params = {"page": page, "pageSize": page_size}
+        if labels:
+            params["labels"] = labels
         resp = session.get(url, params=params, verify=False)
         resp.raise_for_status()
         data = resp.json()
@@ -182,78 +189,33 @@ def get_group_detections(session: requests.Session, host: str, group_id: str) ->
     return all_detections
 
 
-def get_phantom_groups(session: requests.Session, host: str, listed_ids: set,
-                       windows: int = 4, event_limit: int = 1000) -> list:
-    """Harvest face groups that exist in detections but are absent from the
-    /recognition/face/groups listing — i.e. Protect's 'unknown' and 'degraded'
-    faces.
+def get_degraded_face_groups(session: requests.Session, host: str,
+                             listed_ids: set) -> list:
+    """Every 'degraded' (low-quality) face cluster, straight from the API.
 
-    The listing endpoint only returns committed groups, so unknown/degraded
-    clusters never appear there even though their detections can be fetched and
-    enhanced per-id. Without this the enhancer never submits them. Mirrors
-    ProtectClient.harvest_phantom_groups (see protect_client.py) — kept as a
-    standalone fn so the enhancer keeps its own session.
+    Protect's default groups listing omits degraded clusters, so the enhancer
+    used to reconstruct them by walking smartDetectZone events and reading
+    group ids off face thumbnails. The listing endpoint takes a `labels`
+    filter, which returns the complete set as real records instead — and the
+    event walk only ever reached a fraction of it. Mirrors
+    ProtectClient.list_degraded_face_groups — kept as a standalone fn so the
+    enhancer keeps its own session.
 
-    /events is hard-capped at ~1000 results and ignores `page`, so we walk a
-    sliding window: each pass sets the next `end` to (oldest start - 1).
-    orderDirection=DESC is mandatory or the API returns the oldest events first.
+    `listed_ids` are the groups already in hand, so we don't fetch their
+    detections twice.
     """
-    now = int(time.time() * 1000)
-    far_start = now - 366 * 86400 * 1000  # 1y floor, server caps anyway
-    end_ms = now
-    seen: dict = {}  # group_id -> {matchedName, groupType}
-
-    for _ in range(max(1, windows)):
-        try:
-            resp = session.get(
-                f"https://{host}{BASE_PROTECT}/events",
-                params={"start": far_start, "end": end_ms,
-                        "type": "smartDetectZone", "limit": event_limit,
-                        "orderDirection": "DESC"},
-                verify=False, timeout=60)
-        except Exception:
-            break
-        if resp.status_code != 200:
-            break
-        events = resp.json()
-        if not events:
-            break
-        oldest = end_ms
-        for ev in events:
-            ts = ev.get("start") or 0
-            if ts and ts < oldest:
-                oldest = ts
-            for t in ((ev.get("metadata") or {}).get("detectedThumbnails") or []):
-                if t.get("type") != "face":
-                    continue
-                g = t.get("group") or {}
-                gid = g.get("id")
-                matched = g.get("matchedName")
-                gtype = None
-                for lab in (t.get("labels") or []):
-                    if lab.startswith("group:") and not gid:
-                        gid = lab.split(":", 1)[1] or None
-                    elif lab.startswith("groupType:"):
-                        gtype = lab.split(":", 1)[1] or gtype
-                if not gid or gid in listed_ids:
-                    continue
-                entry = seen.setdefault(gid, {"matchedName": matched, "groupType": gtype})
-                if matched and not entry.get("matchedName"):
-                    entry["matchedName"] = matched
-                if gtype and not entry.get("groupType"):
-                    entry["groupType"] = gtype
-        next_end = oldest - 1
-        if next_end >= end_ms:  # no backward progress (server returned same tail)
-            break
-        end_ms = next_end
-
-    return [
-        {"id": gid, "name": None,
-         "matchedName": info.get("matchedName") or "",
-         "groupType": info.get("groupType"),
-         "_phantom": True}
-        for gid, info in seen.items()
-    ]
+    # pageSize 1000: the degraded set is thousands of rows, so paging it 200 at
+    # a time (with the inter-page sleep) costs seconds for no benefit.
+    groups = get_face_groups(session, host, labels="groupType:degraded",
+                             page_size=1000)
+    # The labels filter fails open: an ignored filter yields the plain
+    # listing, so require the server's own isDegraded rather than trusting it.
+    degraded = [g for g in groups if g.get("isDegraded")]
+    if groups and not degraded:
+        raise RuntimeError(
+            f"labels=groupType:degraded was ignored ({len(groups)} non-degraded "
+            "groups returned) — the filter may have changed in this Protect version")
+    return [g for g in degraded if g.get("id") not in listed_ids]
 
 
 def enhance_face(session: requests.Session, host: str, detection_id: str) -> dict:
@@ -315,7 +277,7 @@ def format_timestamp(ts) -> str:
 
 
 def run_cycle(host, username, password, base_delay, only_unenhanced, group_filter, limit, dry_run, fetch_workers,
-              enhance_phantoms=True, phantom_windows=4, phantom_event_limit=1000):
+              enhance_degraded=True):
     """One full pass: log in, list groups, enhance every pending detection."""
     session = requests.Session()
     session.headers.update({"Accept": "application/json"})
@@ -346,14 +308,17 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
         STATUS.last_error = f"fetch groups failed: {e}"
         return
 
+    # No "Enhanced" column here: the group record's `enhancedPath` is null on
+    # every group Protect returns (the field is vestigial — its own UI never
+    # reads it), so the column only ever printed "No". Enhancement state lives
+    # on the detections, and is reported per-cycle further down.
     print(f"[+] Found {len(groups)} face group(s):\n")
-    print(f"    {'Name':<25} {'Detections':>10}  {'Enhanced':>10}")
-    print(f"    {'-' * 25} {'-' * 10}  {'-' * 10}")
+    print(f"    {'Name':<25} {'Detections':>10}")
+    print(f"    {'-' * 25} {'-' * 10}")
     for g in groups:
         name = g.get("name") or g.get("matchedName") or "(unnamed)"
         count = g.get("detectionsCount", "?")
-        enhanced = "Yes" if g.get("enhancedPath") else "No"
-        print(f"    {name:<25} {str(count):>10}  {enhanced:>10}")
+        print(f"    {name:<25} {str(count):>10}")
 
     if group_filter:
         groups = [g for g in groups if
@@ -364,21 +329,20 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
             return
         print(f"\n[*] Filtered to group: {groups[0].get('name')}")
 
-    # Fold in 'unknown'/'degraded' faces that Protect keeps OUT of the groups
-    # listing. They only surface as references inside smartDetectZone events, so
-    # without this sweep they're never enhanced. Skipped when a group_filter is
-    # active (phantoms are unnamed, so they can't match a name filter).
-    if enhance_phantoms and not group_filter:
+    # Fold in 'degraded' faces, which Protect keeps OUT of the default groups
+    # listing — without them the enhancer never submits those detections.
+    # Skipped when a group_filter is active (degraded clusters are unnamed, so
+    # they can't match a name filter).
+    if enhance_degraded and not group_filter:
         listed_ids = {g["id"] for g in groups}
-        print("\n[*] Harvesting unknown/degraded faces from recent events...")
+        print("\n[*] Fetching degraded face groups...")
         try:
-            phantoms = get_phantom_groups(session, host, listed_ids,
-                                          phantom_windows, phantom_event_limit)
-            print(f"[+] Found {len(phantoms)} unlisted face group(s) "
-                  f"(unknown/degraded) not in the groups listing")
-            groups = groups + phantoms
+            degraded = get_degraded_face_groups(session, host, listed_ids)
+            print(f"[+] Found {len(degraded)} degraded face group(s) "
+                  f"not in the default listing")
+            groups = groups + degraded
         except Exception as e:
-            print(f"[!] Phantom harvest failed ({type(e).__name__}: {e}) — "
+            print(f"[!] Degraded group fetch failed ({type(e).__name__}: {e}) — "
                   f"continuing with listed groups only")
 
     workers = max(1, fetch_workers)
@@ -388,8 +352,7 @@ def run_cycle(host, username, password, base_delay, only_unenhanced, group_filte
     def fetch_one(g):
         group_name = g.get("name") or g.get("matchedName")
         if not group_name:
-            gt = g.get("groupType")
-            group_name = f"({gt})" if gt else "(unnamed)"
+            group_name = "(degraded)" if g.get("isDegraded") else "(unnamed)"
         try:
             detections = get_group_detections(session, host, g["id"])
             for d in detections:
@@ -633,9 +596,9 @@ def main():
     group_filter = env_str("GROUP_FILTER") or None
     limit = env_int("LIMIT", 0)
     dry_run = env_bool("DRY_RUN", False)
-    enhance_phantoms = env_bool("ENHANCE_PHANTOMS", True)
-    phantom_windows = env_int("PHANTOM_WINDOWS", 4)
-    phantom_event_limit = env_int("PHANTOM_EVENT_LIMIT", 1000)
+    # ENHANCE_PHANTOMS is the pre-0.9 name for this flag, still honoured so
+    # existing .env files keep working.
+    enhance_degraded = env_bool("ENHANCE_DEGRADED", env_bool("ENHANCE_PHANTOMS", True))
     run_once = env_bool("RUN_ONCE", False)
     poll_interval = env_int("POLL_INTERVAL", 300)
     fetch_workers = env_int("FETCH_WORKERS", 8)
@@ -647,7 +610,7 @@ def main():
     print(f"[*] UniFi Protect Face Enhance v{__version__} ({__build_date__})")
     print(f"    host={host} user={username}")
     print(f"    enhancer={enhancer_enabled} (poll_interval={poll_interval}s, run_once={run_once}, dry_run={dry_run})")
-    print(f"    enhance_phantoms={enhance_phantoms} (unknown/degraded faces; windows={phantom_windows})")
+    print(f"    enhance_degraded={enhance_degraded} (degraded/low-quality faces)")
     print(f"    webapp={webapp_enabled} (port={webapp_port})")
     print(f"    fetch_workers={fetch_workers}")
     if group_filter:
@@ -662,7 +625,7 @@ def main():
             try:
                 run_cycle(host, username, password, base_delay,
                           only_unenhanced, group_filter, limit, dry_run, fetch_workers,
-                          enhance_phantoms, phantom_windows, phantom_event_limit)
+                          enhance_degraded)
             except Exception as e:
                 print(f"[!] Cycle crashed: {type(e).__name__}: {e}")
                 STATUS.state = "error"

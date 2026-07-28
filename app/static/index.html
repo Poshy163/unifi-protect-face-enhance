@@ -2362,7 +2362,7 @@ api("GET", "/api/version").then(v => {
 pollEnhancerStatus();
 enhancerPollTimer = setInterval(pollEnhancerStatus, 2000);
 
-// Auto-refresh the unenrolled list every 30s so new phantom groups created
+// Auto-refresh the unenrolled list every 30s so new clusters created
 // by Protect appear without manual refresh. Skipped while modals are open,
 // while AI mode is running, or in the detail view (no point).
 let autoRefreshTimer = setInterval(() => {

@@ -32,16 +32,24 @@ _AI_UNCONFIGURED = (
 
 
 def _gallery_min_conf() -> float:
-    """Drop gallery detections below this `matchedGroupConfidence` (0–1).
+    """Drop gallery detections below this `matchedGroupConfidence`.
 
     Low-confidence detections are the ones Protect most often *misattributes* to
     the wrong person; one wrong face in a gallery causes confident false matches.
-    Default 0 (off) keeps every confidence; raise (e.g. 0.6) to harden galleries
-    if you see cross-person matches."""
+    Default 0 (off) keeps every confidence; raise to harden galleries if you see
+    cross-person matches.
+
+    Scale: `matchedGroupConfidence` is an integer PERCENTAGE (0–100), not a
+    0–1 fraction — on a live instance it spans roughly 77–95, so a meaningful
+    floor is ~80. This was previously documented as 0–1, which made every
+    setting in that range a no-op. Values ≤ 1 are therefore read as the old
+    fraction and scaled, so an existing `0.6` now means what it was meant to.
+    """
     try:
-        return max(0.0, float(os.getenv("LOCAL_GALLERY_MIN_CONF", "0") or 0))
+        floor = max(0.0, float(os.getenv("LOCAL_GALLERY_MIN_CONF", "0") or 0))
     except ValueError:
         return 0.0
+    return floor * 100 if 0 < floor <= 1.0 else floor
 
 
 def _ai_batch_max() -> int:
@@ -286,22 +294,24 @@ def create_app(client: ProtectClient) -> FastAPI:
     @app.get("/api/unenrolled")
     def list_unenrolled(
         include_degraded: bool = Query(True),
-        include_phantoms: bool = Query(True),
         min_detections: int = Query(1, ge=0),
         offset: int = Query(0, ge=0),
         limit: int = Query(60, ge=1, le=500),
     ) -> dict:
         """Every unnamed face cluster, sorted by most-recent first.
 
-        - Pulls listed groups from /recognition/face/groups.
-        - When `include_phantoms` is true (default), ALSO harvests group IDs
-          referenced by recent face events but missing from the listing —
-          that's where freshly-created clusters and the bulk of degraded
-          singletons live. Protect's UI shows these; we missed them before.
-        - `include_degraded=true` (default) keeps Protect's "low quality"
-          face clusters. Set false to hide single-detection junk crops.
+        Two listings make up the set, because Protect splits them:
+        /recognition/face/groups returns known + unknown clusters but no
+        degraded ones, and `?labels=groupType:degraded` returns those.
+
+        `include_degraded=true` (default) keeps Protect's "low quality" face
+        clusters. Set false to hide single-detection junk crops — which now
+        also skips the second (3-page) fetch entirely.
         """
         groups = client.list_face_groups()
+        if include_degraded:
+            groups = groups + client.list_degraded_face_groups()
+
         unnamed = []
         for g in groups:
             if is_named_identity(g):
@@ -311,14 +321,6 @@ def create_app(client: ProtectClient) -> FastAPI:
             if (g.get("detectionsCount") or 0) < min_detections:
                 continue
             unnamed.append(group_summary(g))
-
-        if include_phantoms:
-            for g in client.harvest_phantom_groups():
-                if g.get("isDegraded") and not include_degraded:
-                    continue
-                if (g.get("detectionsCount") or 0) < min_detections:
-                    continue
-                unnamed.append(group_summary(g))
 
         unnamed.sort(key=lambda g: g.get("lastDetectedAt") or 0, reverse=True)
         total = len(unnamed)
@@ -373,7 +375,6 @@ def create_app(client: ProtectClient) -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         client.invalidate_groups_cache()
-        client.invalidate_phantom_cache()
         for gid in body.fromGroupIds + [body.toGroupId]:
             invalidate_ref_image(gid)
         return {"ok": True, "merged": len(body.fromGroupIds), "result": result}
@@ -387,7 +388,6 @@ def create_app(client: ProtectClient) -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         client.invalidate_groups_cache()
-        client.invalidate_phantom_cache()
         invalidate_ref_image(group_id)
         return group_summary(result)
 
@@ -403,7 +403,6 @@ def create_app(client: ProtectClient) -> FastAPI:
             except Exception as e:
                 failed.append({"id": gid, "error": str(e)[:200]})
         client.invalidate_groups_cache()
-        client.invalidate_phantom_cache()
         return {"ok": True, "deleted": deleted, "failed": failed}
 
     @app.post("/api/retroactive/start")
@@ -658,7 +657,6 @@ def create_app(client: ProtectClient) -> FastAPI:
         if r.status_code >= 400:
             raise HTTPException(400, f"reassign failed HTTP {r.status_code}: {r.text[:300]}")
         client.invalidate_groups_cache()
-        client.invalidate_phantom_cache()
         return {
             "ok": True,
             "moved": len(body.detectionIds),

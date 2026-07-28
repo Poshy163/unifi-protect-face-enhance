@@ -30,11 +30,18 @@ class ProtectClient:
         self.pool_size = pool_size
         self._session: requests.Session | None = None
         self._lock = threading.RLock()
-        # Cached list_face_groups output. The webapp hits this constantly —
-        # caching turns ~1-2s of pagination into a dict lookup.
+        # Cached list_face_groups output, keyed by the `labels` filter. The
+        # webapp hits this constantly — caching turns ~1-2s of pagination into
+        # a dict lookup.
         self._groups_cache_ttl = groups_cache_ttl
-        self._groups_cache_at = 0.0
-        self._groups_cache_data: list[dict] | None = None
+        # The degraded listing is ~2900 groups over 3 pages, so it gets a
+        # longer TTL than the ~300-row default listing.
+        try:
+            self._labelled_cache_ttl = float(os.getenv("DEGRADED_CACHE_TTL", "45") or 45)
+        except ValueError:
+            self._labelled_cache_ttl = 45.0
+        # labels-or-None -> (fetched_at, groups)
+        self._groups_cache: dict[str | None, tuple[float, list[dict]]] = {}
         self._groups_cache_lock = threading.Lock()
 
     def _login_locked(self) -> None:
@@ -100,22 +107,37 @@ class ProtectClient:
     def delete(self, path: str, **kwargs: Any) -> requests.Response:
         return self.request("DELETE", path, **kwargs)
 
-    def list_face_groups(self, page_size: int = 1000,
+    def list_face_groups(self, labels: str | None = None, page_size: int = 1000,
                          force_refresh: bool = False) -> list[dict]:
         """Paginate through every face group. TTL-cached so the webapp
-        doesn't hammer the Protect API on every page load."""
+        doesn't hammer the Protect API on every page load.
+
+        `labels` filters server-side. Comma-joined values inside one param are
+        ORed (`"groupType:known,groupType:degraded"`); the default listing
+        (labels=None) returns known + unknown groups but NO degraded ones.
+
+        Caller beware: this filter FAILS OPEN. A misspelled label returns
+        HTTP 200 with the full unfiltered listing rather than an error, so
+        never trust a 200 as proof the filter applied — see
+        list_degraded_face_groups, which validates what came back.
+        """
+        cache_key = labels
+        ttl = self._groups_cache_ttl if labels is None else self._labelled_cache_ttl
         now = time.time()
         with self._groups_cache_lock:
-            if (not force_refresh
-                    and self._groups_cache_data is not None
-                    and now - self._groups_cache_at < self._groups_cache_ttl):
-                return self._groups_cache_data
+            hit = self._groups_cache.get(cache_key)
+            if not force_refresh and hit is not None and now - hit[0] < ttl:
+                return hit[1]
+
+        params: dict[str, Any] = {"page": 1, "pageSize": page_size}
+        if labels:
+            params["labels"] = labels
 
         out: list[dict] = []
         page = 1
         while True:
-            r = self.get(f"{BASE_PROTECT}/recognition/face/groups",
-                         params={"page": page, "pageSize": page_size})
+            params["page"] = page
+            r = self.get(f"{BASE_PROTECT}/recognition/face/groups", params=params)
             r.raise_for_status()
             j = r.json()
             batch = j.get("groups", []) if isinstance(j, dict) else j
@@ -129,159 +151,42 @@ class ProtectClient:
             time.sleep(0.05)
 
         with self._groups_cache_lock:
-            self._groups_cache_data = out
-            self._groups_cache_at = time.time()
+            self._groups_cache[cache_key] = (time.time(), out)
         return out
 
     def invalidate_groups_cache(self) -> None:
-        """Drop the cached groups list so the next call refetches."""
+        """Drop every cached groups listing so the next call refetches."""
         with self._groups_cache_lock:
-            self._groups_cache_data = None
-            self._groups_cache_at = 0.0
+            self._groups_cache.clear()
 
-    def invalidate_phantom_cache(self) -> None:
-        """Drop the phantom-group cache so the next harvest re-walks events."""
-        lock = getattr(self, "_phantom_lock", None)
-        cache = getattr(self, "_phantom_cache", None)
-        if lock is None or cache is None:
-            return
-        with lock:
-            cache["at"] = 0.0
-            cache["data"] = []
+    def list_degraded_face_groups(self, force_refresh: bool = False) -> list[dict]:
+        """Every 'degraded' (low-quality) face cluster, straight from the API.
 
-    @staticmethod
-    def _thumb_group(t: dict) -> tuple[str | None, str | None, str | None]:
-        """Extract (group_id, group_type, matched_name) from a face thumbnail.
+        Protect's default groups listing omits degraded clusters entirely, so
+        they used to be reconstructed by walking smartDetectZone events and
+        synthesising records from the group ids found on face thumbnails. That
+        is unnecessary: the listing endpoint accepts a `labels` filter, and
+        `groupType:degraded` returns the complete set (~2900 here vs the ~830
+        the event walk reached) as full-fidelity records — real
+        detectionsCount, firstDetectedAt/lastDetectedAt, imagePath and, most
+        importantly, an authoritative `isDegraded` instead of one inferred
+        from the id prefix.
 
-        Protect stashes the group two different ways and neither is reliably
-        present on its own — verified against a live instance:
-          - `thumb.group` object: {"id", "matchedName", ...} (most thumbnails)
-          - `thumb.labels`: ["group:<id>", "groupType:degraded|known|unknown"]
-            (~6% of thumbnails carry the id ONLY here)
-        We union both so no referenced group slips through.
+        The `labels` filter fails open, so validate rather than trust: if the
+        server hands back rows that aren't degraded, the filter didn't apply
+        and we must not pass them off as degraded.
         """
-        g = t.get("group") or {}
-        gid = g.get("id")
-        gtype = None
-        matched = g.get("matchedName")
-        for lab in (t.get("labels") or []):
-            if lab.startswith("group:") and not gid:
-                gid = lab.split(":", 1)[1] or None
-            elif lab.startswith("groupType:"):
-                gtype = lab.split(":", 1)[1] or None
-        return gid, gtype, matched
-
-    def harvest_phantom_groups(self, windows: int | None = None,
-                               event_limit: int | None = None,
-                               cache_ttl: float | None = None) -> list[dict]:
-        """Walk recent smartDetectZone events and return synthetic records
-        for every face group referenced that isn't in /recognition/face/groups.
-
-        Protect's listing endpoint only returns 'committed' face groups; new
-        clusters and most face_degraded_* singletons don't appear there, even
-        though their detections exist and can be fetched per-id. This bridges
-        that gap so the UI shows every face Protect has seen.
-
-        Coverage notes (verified against a live Protect 7.x instance):
-          - /events is hard-capped at ~1000 results per request and IGNORES
-            the `page` param, so a single call only reaches ~30h back. To see
-            every face we walk a SLIDING WINDOW: each pass sets the next
-            `end` to (oldest event start - 1) and refetches. `windows` passes
-            cover roughly `windows` days. Defaults come from env so a deep
-            one-off sweep is just a config bump, no redeploy.
-          - orderDirection=DESC is mandatory; without it the API returns the
-            OLDEST events first and the recent clusters never appear.
-        """
-        if windows is None:
-            windows = max(1, int(os.getenv("PHANTOM_WINDOWS", "4") or 4))
-        if event_limit is None:
-            event_limit = int(os.getenv("PHANTOM_EVENT_LIMIT", "1000") or 1000)
-        if cache_ttl is None:
-            cache_ttl = float(os.getenv("PHANTOM_CACHE_TTL", "45") or 45)
-
-        cache_attr = "_phantom_cache"
-        lock_attr = "_phantom_lock"
-        if not hasattr(self, lock_attr):
-            setattr(self, lock_attr, threading.Lock())
-            setattr(self, cache_attr, {"at": 0.0, "data": []})
-        lock = getattr(self, lock_attr)
-        cache = getattr(self, cache_attr)
-        now = time.time()
-        with lock:
-            if now - cache["at"] < cache_ttl:
-                return cache["data"]
-
-        listed = {g["id"] for g in self.list_face_groups()}
-        far_start = int(now * 1000) - 366 * 86400 * 1000  # 1y floor, server caps anyway
-        end_ms = int(now * 1000)
-
-        # group_id -> {count, last_ts, first_ts, matchedName, groupType}
-        seen: dict[str, dict] = {}
-        for _ in range(windows):
-            r = self.get(
-                f"{BASE_PROTECT}/events",
-                params={"start": far_start, "end": end_ms,
-                        "type": "smartDetectZone", "limit": event_limit,
-                        "orderDirection": "DESC"},
-                timeout=60,
-            )
-            if r.status_code != 200:
-                break
-            events = r.json()
-            if not events:
-                break
-            oldest = end_ms
-            for ev in events:
-                ts = ev.get("start") or 0
-                if ts and ts < oldest:
-                    oldest = ts
-                for t in ((ev.get("metadata") or {}).get("detectedThumbnails") or []):
-                    if t.get("type") != "face":
-                        continue
-                    gid, gtype, matched = self._thumb_group(t)
-                    if not gid or gid in listed:
-                        continue
-                    entry = seen.setdefault(gid, {"count": 0, "last_ts": 0,
-                                                  "first_ts": ts or 0,
-                                                  "matchedName": matched,
-                                                  "groupType": gtype})
-                    entry["count"] += 1
-                    if matched and not entry.get("matchedName"):
-                        entry["matchedName"] = matched
-                    if gtype and not entry.get("groupType"):
-                        entry["groupType"] = gtype
-                    if (ts or 0) > entry["last_ts"]:
-                        entry["last_ts"] = ts or 0
-                    if (ts or 0) < entry["first_ts"] or entry["first_ts"] == 0:
-                        entry["first_ts"] = ts or 0
-            # Step the window back. Stop if we made no backward progress
-            # (server returned the same tail again).
-            next_end = oldest - 1
-            if next_end >= end_ms:
-                break
-            end_ms = next_end
-
-        synthetic = []
-        for gid, info in seen.items():
-            degraded = gid.startswith("face_degraded_") or info.get("groupType") == "degraded"
-            synthetic.append({
-                "id": gid,
-                "name": None,
-                "matchedName": info.get("matchedName") or "",
-                "type": "face",
-                "isDegraded": degraded,
-                "groupType": info.get("groupType"),
-                "detectionsCount": info["count"],
-                "firstDetectedAt": info["first_ts"] or None,
-                "lastDetectedAt": info["last_ts"] or None,
-                "metadata": {},
-                "_phantom": True,
-            })
-
-        with lock:
-            cache["at"] = time.time()
-            cache["data"] = synthetic
-        return synthetic
+        groups = self.list_face_groups(labels="groupType:degraded",
+                                       force_refresh=force_refresh)
+        degraded = [g for g in groups if g.get("isDegraded")]
+        if groups and not degraded:
+            # Every row came back non-degraded: the filter was ignored and we
+            # got the plain listing. Report it instead of silently returning [].
+            raise RuntimeError(
+                "labels=groupType:degraded was ignored by the controller "
+                f"({len(groups)} non-degraded groups returned) — the filter "
+                "may have been removed or renamed in this Protect version")
+        return degraded
 
     def find_enhanced_id_for_group(self, group_id: str) -> str | None:
         """Return the first enhancedImageId in the group's detections, or None.
